@@ -1,0 +1,42 @@
+{
+  "name": "@adityapdixit/rexai",
+  "version": "7.0.0",
+  "main": "src/index.js",
+  "type": "module",
+  "bin": {
+    "rexai": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "package.json"
+  ],
+  "scripts": {
+    "test": "npm run test:browser-regression",
+    "test:browser-regression": "node tests/browser_regression_test.js",
+    "test:browser-stress": "node tests/browser_stress_test.js",
+    "postinstall": "npx playwright install chromium"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
+    "@clack/prompts": "^1.1.0",
+    "@google/generative-ai": "^0.24.1",
+    "cfonts": "^3.3.1",
+    "cli-table3": "^0.6.5",
+    "commander": "^14.0.3",
+    "dotenv": "^17.3.1",
+    "gradient-string": "^3.0.0",
+    "howler": "^2.2.4",
+    "husky": "^9.1.7",
+    "node-llama-cpp": "^3.0.0-beta.18",
+    "ollama": "^0.6.3",
+    "openai": "^6.25.0",
+    "picocolors": "^1.1.1",
+    "playwright": "^1.58.2",
+    "simple-git": "^3.32.3",
+    "update-notifier": "^7.3.1"
+  }
+}

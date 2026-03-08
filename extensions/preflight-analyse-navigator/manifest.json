@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Preflight Analyse Navigator",
+  "description": "Assists RexAI browser automation with stable interaction markers, visibility scoring, and click/type reliability signals.",
+  "version": "1.0.0",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Preflight Analyse Navigator"
+  }
+}

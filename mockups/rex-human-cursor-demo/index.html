@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rex Human Cursor Mockup</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@500;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="bg-noise"></div>
+  <div class="orb orb-a"></div>
+  <div class="orb orb-b"></div>
+
+  <main class="page">
+    <header class="hero">
+      <p class="eyebrow">Rex R&D Prototype</p>
+      <h1>Preflight Cursor Theater</h1>
+      <p class="subtitle">
+        A visual mockup for autonomous browsing where a synthetic cursor behaves with
+        smoother, human-like movement and intent.
+      </p>
+      <div class="cta-row">
+        <a href="#" class="link-card js-clickable" data-title="Open Docs">Open Docs</a>
+        <a href="#" class="link-card js-clickable" data-title="Review Targets">Review Targets</a>
+        <button class="link-card js-clickable" data-title="Run Check">Run Check</button>
+      </div>
+    </header>
+
+    <section class="panel-grid">
+      <article class="panel">
+        <h2>Interaction Feed</h2>
+        <ul id="feed" class="feed"></ul>
+      </article>
+
+      <article class="panel">
+        <h2>Navigation Surface</h2>
+        <div class="surface">
+          <a href="#" class="chip js-clickable" data-title="Pricing">Pricing</a>
+          <a href="#" class="chip js-clickable" data-title="Changelog">Changelog</a>
+          <a href="#" class="chip js-clickable" data-title="Support">Support</a>
+          <button class="chip js-clickable" data-title="Submit Form">Submit Form</button>
+          <button class="chip js-clickable" data-title="Inspect Nodes">Inspect Nodes</button>
+          <a href="#" class="chip js-clickable" data-title="Open Console">Open Console</a>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <div id="cursor" class="rex-cursor" aria-hidden="true">
+    <div class="cursor-core"></div>
+    <div class="cursor-ring"></div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
