@@ -40,6 +40,7 @@ import { saveSession, loadSession, listSessions, searchSessions } from './sessio
 import { listWorkflows, loadWorkflow, createSampleWorkflow } from './workflows.js';
 import { saveProfile, loadProfile, listProfiles } from './profiles.js';
 import { indexProject, getIndexSummary } from './indexer.js';
+import { runActionEngine } from './agent/actionEngine.js';
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
@@ -334,13 +335,13 @@ export async function startAgentChat(options = {}) {
     let autoPilotCount = 0;
     let userInput = '';
     const plannerState = createPlannerState();
-    let osAccessGranted = false;
 
     // Sprint 2 features
     const costTracker = new CostTracker();
     const toolPermissions = loadToolPermissions();
     let lastToolKey = '';    // for stuck detection
     let stuckCount = 0;      // consecutive same-tool calls
+    const actionEngineState = { osAccessGranted: false };
 
     // Session-based auto-pilot
     if (options.auto) {
@@ -392,8 +393,8 @@ export async function startAgentChat(options = {}) {
     }
 
     // Readonly mode: block write tools
-    const WRITE_TOOLS = ['write_file', 'patch_file', 'run_shell', 'browser_interact', 'run_python', 'os_agent'];
-    const OS_GATED_TOOLS = new Set(['os_agent', 'mouse_click', 'type_text']);
+    const WRITE_TOOLS = ['write_file', 'patch_file', 'run_shell', 'browser_interact', 'run_python', 'os_agent', 'mouse_click', 'type_text'];
+    const OS_GATED_TOOLS = ['os_agent', 'mouse_click', 'type_text'];
 
     // Abort controller for interrupting AI/Tools
     let abortController = new AbortController();
@@ -760,55 +761,6 @@ ${planModeRules}
                             }
                         }
 
-                        // Tool permission check
-                        const permCheck = isToolAllowed(toolMatch, toolPermissions);
-                        if (!permCheck.allowed) {
-                            p.note(pc.red(`🚫 BLOCKED: ${toolMatch} — ${permCheck.reason}`), 'System');
-                            logToolCall(toolMatch, toolArgs, 'BLOCKED (permissions)', 'blocked');
-                            historyContext.push({ role: 'assistant', content: `[BLOCKED: ${toolMatch} — ${permCheck.reason}]` });
-                            if (planModeEnabled) {
-                                plannerState.issueCounter += 1;
-                                isAgentIterating = true;
-                                userInput = `Planning issue detected: tool ${toolMatch} was blocked (${permCheck.reason}). Create or update a subplan to resolve this blocker using allowed tools, execute one step now, then return to the parent task ${plannerState.activeTaskId || 'when unblocked'}.`;
-                                historyContext.push({ role: 'user', content: userInput });
-                            } else {
-                                isAgentIterating = false;
-                            }
-                            continue;
-                        }
-
-                        // One-time OS automation consent gate per chat session
-                        if (OS_GATED_TOOLS.has(toolMatch) && !osAccessGranted) {
-                            const osConsent = await p.confirm({
-                                message: pc.yellow('Allow Rex to access OS automation controls for this chat session? (one-time prompt)'),
-                                initialValue: false
-                            });
-
-                            if (p.isCancel(osConsent) || !osConsent) {
-                                p.note(pc.red('OS automation access denied for this session.'), 'System');
-                                logToolCall(toolMatch, toolArgs, 'BLOCKED (os access denied)', 'blocked');
-                                historyContext.push({ role: 'assistant', content: `[BLOCKED: ${toolMatch} requires one-time OS access approval]` });
-                                isAgentIterating = false;
-                                continue;
-                            }
-
-                            osAccessGranted = true;
-                            p.note(pc.green('OS automation access approved for this session.'), 'System');
-                        }
-
-                        // Readonly guard
-                        if (options.readonly && WRITE_TOOLS.includes(toolMatch)) {
-                            p.note(pc.red(`🔒 READONLY MODE: Blocked ${toolMatch}. Rex can only read in this mode.`), 'System');
-                            logToolCall(toolMatch, toolArgs, 'BLOCKED (readonly)', 'blocked');
-                            historyContext.push({ role: 'assistant', content: `[BLOCKED: ${toolMatch} is not allowed in readonly mode]` });
-                            isAgentIterating = true;
-                            userInput = planModeEnabled
-                                ? `Planning issue detected: ${toolMatch} is blocked by READONLY mode. Create/update a subplan that only uses read-safe tools, execute one subplan step, and then continue the main plan.`
-                                : `The tool ${toolMatch} was blocked because we are in READONLY mode. Find an alternative approach that only reads data.`;
-                            historyContext.push({ role: 'user', content: userInput });
-                            continue;
-                        }
-
                         // Stuck detection: same tool+args 3x in a row
                         const currentToolKey = `${toolMatch}:${JSON.stringify(toolArgs)}`;
                         if (currentToolKey === lastToolKey) {
@@ -834,40 +786,97 @@ ${planModeRules}
                             lastToolKey = currentToolKey;
                         }
 
-                        // Execute with auto-retry (max 3 attempts)
-                        let result;
-                        let retryCount = 0;
-                        const MAX_RETRIES = 3;
+                        const engineOutcome = await runActionEngine({
+                            toolName: toolMatch,
+                            toolArgs,
+                            sessionMeta,
+                            historyContext,
+                            runtime: {
+                                options: { readonly: !!options.readonly },
+                                toolPermissions,
+                                isToolAllowed,
+                                writeTools: WRITE_TOOLS,
+                                osGatedTools: OS_GATED_TOOLS,
+                                state: actionEngineState
+                            },
+                            confirm: async (risk) => {
+                                const ok = await p.confirm({
+                                    message: pc.yellow(risk.reason),
+                                    initialValue: false
+                                });
 
-                        while (retryCount < MAX_RETRIES) {
-                            try {
-                                if (Object.keys(toolArgs).length > 0) {
-                                    if (toolMatch === 'delegate_task') {
-                                        result = await toolDef.action(toolArgs, isLocal, abortController.signal);
+                                if (risk.code === 'os_access_gate') {
+                                    if (!p.isCancel(ok) && ok) {
+                                        p.note(pc.green('OS automation access approved for this session.'), 'System');
                                     } else {
-                                        // Pass signal if tool supports it (like browser_interact)
-                                        result = await toolDef.action(toolArgs, abortController.signal);
+                                        p.note(pc.red('OS automation access denied for this session.'), 'System');
                                     }
-                                } else {
-                                    result = await toolDef.action();
                                 }
-                                break; // Success, exit retry loop
-                            } catch (toolErr) {
-                                if (toolErr.name === 'AbortError' || toolErr.message === 'Aborted') {
-                                    throw toolErr; // Catch in outer loop
+
+                                return !p.isCancel(ok) && !!ok;
+                            },
+                            execute: async () => {
+                                let attempts = 0;
+                                const MAX_RETRIES = 3;
+
+                                while (attempts < MAX_RETRIES) {
+                                    try {
+                                        let result;
+                                        if (Object.keys(toolArgs).length > 0) {
+                                            if (toolMatch === 'delegate_task') {
+                                                result = await toolDef.action(toolArgs, isLocal, abortController.signal);
+                                            } else {
+                                                // Pass signal if tool supports it (like browser_interact)
+                                                result = await toolDef.action(toolArgs, abortController.signal);
+                                            }
+                                        } else {
+                                            result = await toolDef.action();
+                                        }
+                                        return { result, retries: attempts };
+                                    } catch (toolErr) {
+                                        if (toolErr.name === 'AbortError' || toolErr.message === 'Aborted') {
+                                            throw toolErr;
+                                        }
+                                        attempts++;
+                                        if (attempts >= MAX_RETRIES) {
+                                            throw new Error(`Tool failed after ${MAX_RETRIES} attempts: ${toolErr.message}`);
+                                        }
+                                        p.note(pc.yellow(`⚡ Tool error (attempt ${attempts}/${MAX_RETRIES}): ${toolErr.message}. Retrying...`), 'System');
+                                    }
                                 }
-                                retryCount++;
-                                if (retryCount >= MAX_RETRIES) {
-                                    result = `Tool error after ${MAX_RETRIES} retries: ${toolErr.message}`;
-                                    p.note(pc.red(`⚠️ Tool failed after ${MAX_RETRIES} attempts: ${toolErr.message}`), 'System');
-                                } else {
-                                    p.note(pc.yellow(`⚡ Tool error (attempt ${retryCount}/${MAX_RETRIES}): ${toolErr.message}. Retrying...`), 'System');
-                                }
+
+                                throw new Error('Unexpected execution state.');
                             }
+                        });
+
+                        if (engineOutcome.status === 'blocked') {
+                            p.note(pc.red(`🚫 BLOCKED: ${toolMatch} — ${engineOutcome.risk.reason}`), 'System');
+                            logToolCall(toolMatch, toolArgs, `BLOCKED (${engineOutcome.risk.code})`, 'blocked');
+                            historyContext.push({ role: 'assistant', content: `[BLOCKED: ${toolMatch} — ${engineOutcome.risk.reason}]` });
+                            if (planModeEnabled) {
+                                plannerState.issueCounter += 1;
+                                isAgentIterating = true;
+                                userInput = `Planning issue detected: tool ${toolMatch} was blocked (${engineOutcome.risk.reason}). Create or update a subplan to resolve this blocker using allowed tools, execute one step now, then return to the parent task ${plannerState.activeTaskId || 'when unblocked'}.`;
+                                historyContext.push({ role: 'user', content: userInput });
+                            } else {
+                                isAgentIterating = false;
+                            }
+                            continue;
                         }
-                        
+
+                        if (engineOutcome.status === 'cancelled') {
+                            logToolCall(toolMatch, toolArgs, `CANCELLED (${engineOutcome.risk.code})`, 'blocked');
+                            historyContext.push({ role: 'assistant', content: `[CANCELLED: ${toolMatch} requires confirmation]` });
+                            isAgentIterating = false;
+                            continue;
+                        }
+
+                        const result = engineOutcome.result;
+                        const retryCount = Number(engineOutcome.retries || 0);
+                        const toolSucceeded = engineOutcome.status === 'success';
+
                         // Audit log
-                        logToolCall(toolMatch, toolArgs, result, retryCount < MAX_RETRIES ? 'success' : 'error');
+                        logToolCall(toolMatch, toolArgs, result, toolSucceeded ? 'success' : 'error');
 
                         // Diff view for patch_file
                         if (toolMatch === 'patch_file' && toolArgs.targetContent && toolArgs.replacementContent) {
@@ -899,7 +908,7 @@ ${planModeRules}
                             p.note(pc.dim(`Plan progress: ${doneCount}/${totalCount || '?'} tasks done${subplanStatus}`), 'Planner');
                         }
                         
-                        const toolFailed = retryCount >= MAX_RETRIES || String(result || '').startsWith('Tool error after');
+                        const toolFailed = !toolSucceeded || String(result || '').startsWith('Tool error after');
                         const resultText = String(result || '');
                         const weakAutonomousCompletion = toolMatch === 'autonomous_web_agent'
                             && /goal achieved/i.test(resultText)
