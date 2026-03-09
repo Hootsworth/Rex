@@ -288,6 +288,25 @@ async function main() {
         });
 
     program
+        .command('os-agent')
+        .description('Isolated Windows OS-level automation mode')
+        .option('--open <app>', 'Open an application (e.g. notepad.exe)')
+        .option('--focus <title>', 'Focus a window by title substring')
+        .option('--move <x,y>', 'Move mouse to coordinates')
+        .option('--click <x,y>', 'Click at coordinates')
+        .option('--button <button>', 'Mouse button for --click (left/right)', 'left')
+        .option('--type <text>', 'Type text into the active window')
+        .option('--hotkey <combo>', 'Send hotkey (e.g. CTRL+L, ALT+F4)')
+        .option('--wait <ms>', 'Wait in milliseconds between actions')
+        .option('--script <path>', 'Run action list from JSON file')
+        .option('--dry-run', 'Print actions without controlling the OS')
+        .action(async (opts) => {
+            const { runOsAgentFromCli } = await import('./osAgent.js');
+            await runOsAgentFromCli(opts);
+            process.exit(0);
+        });
+
+    program
         .command('hook <action>')
         .description('Install or remove AI git hooks (install/remove)')
         .action(async (action) => {
@@ -810,6 +829,7 @@ async function showComprehensiveHelp(program) {
                 { cmd: 'rexai docker-push', desc: 'Build and push docker image' },
                 { cmd: CFonts.render('rexai deploy', {font:'console'}).string.trim(), desc: 'Cloud deployment assistant' },
                 { cmd: 'rexai share <port>', desc: 'Public tunnel for local port (vía share.js)' },
+                { cmd: 'rexai os-agent', desc: 'Isolated Windows OS-level automation mode' },
                 { cmd: 'rexai hook install', desc: 'Install AI-powered git commit hooks' },
                 { cmd: 'rexai plugins', desc: 'Browse and run community plugins' }
             ]

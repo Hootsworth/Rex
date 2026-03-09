@@ -180,7 +180,8 @@ const AVAILABLE_TOOLS = [
     { name: 'set_clipboard', desc: 'Write text to system clipboard. Args: {"text": "..."}', action: async (args) => { const { setClipboard } = await import('./clipboard.js'); return await setClipboard(args.text); } },
     { name: 'send_email', desc: 'Send an email via SMTP. Args: {"to": "...", "subject": "...", "body": "..."}', action: async (args) => { const { sendEmail } = await import('./email.js'); return await sendEmail(args.to, args.subject, args.body); } },
     { name: 'mouse_click', desc: 'Simulate a mouse click at specific coordinates (Windows). Args: {"x": 500, "y": 500}', action: async (args) => { const { mouseClick } = await import('./gui.js'); return await mouseClick(args.x, args.y); } },
-    { name: 'type_text', desc: 'Simulate typing text into the active window (Windows). Args: {"text": "..."}', action: async (args) => { const { typeText } = await import('./gui.js'); return await typeText(args.text); } }
+    { name: 'type_text', desc: 'Simulate typing text into the active window (Windows). Args: {"text": "..."}', action: async (args) => { const { typeText } = await import('./gui.js'); return await typeText(args.text); } },
+    { name: 'os_agent', desc: 'Windows OS automation action for app/window/mouse/keyboard control. Args: {"type":"open|focus|move|click|type|hotkey|wait", ...}', action: async (args) => { const { executeOsAgentAction } = await import('./osAgent.js'); return await executeOsAgentAction(args); } }
 ];
 
 const FUNNY_SPINNERS = [
@@ -333,6 +334,7 @@ export async function startAgentChat(options = {}) {
     let autoPilotCount = 0;
     let userInput = '';
     const plannerState = createPlannerState();
+    let osAccessGranted = false;
 
     // Sprint 2 features
     const costTracker = new CostTracker();
@@ -390,7 +392,8 @@ export async function startAgentChat(options = {}) {
     }
 
     // Readonly mode: block write tools
-    const WRITE_TOOLS = ['write_file', 'patch_file', 'run_shell', 'browser_interact', 'run_python'];
+    const WRITE_TOOLS = ['write_file', 'patch_file', 'run_shell', 'browser_interact', 'run_python', 'os_agent'];
+    const OS_GATED_TOOLS = new Set(['os_agent', 'mouse_click', 'type_text']);
 
     // Abort controller for interrupting AI/Tools
     let abortController = new AbortController();
@@ -772,6 +775,25 @@ ${planModeRules}
                                 isAgentIterating = false;
                             }
                             continue;
+                        }
+
+                        // One-time OS automation consent gate per chat session
+                        if (OS_GATED_TOOLS.has(toolMatch) && !osAccessGranted) {
+                            const osConsent = await p.confirm({
+                                message: pc.yellow('Allow Rex to access OS automation controls for this chat session? (one-time prompt)'),
+                                initialValue: false
+                            });
+
+                            if (p.isCancel(osConsent) || !osConsent) {
+                                p.note(pc.red('OS automation access denied for this session.'), 'System');
+                                logToolCall(toolMatch, toolArgs, 'BLOCKED (os access denied)', 'blocked');
+                                historyContext.push({ role: 'assistant', content: `[BLOCKED: ${toolMatch} requires one-time OS access approval]` });
+                                isAgentIterating = false;
+                                continue;
+                            }
+
+                            osAccessGranted = true;
+                            p.note(pc.green('OS automation access approved for this session.'), 'System');
                         }
 
                         // Readonly guard
