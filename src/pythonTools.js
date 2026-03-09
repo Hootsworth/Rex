@@ -11,7 +11,7 @@ export async function run_python(code, signal = null) {
         if (signal?.aborted) return resolve('Aborted');
 
         const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
-        const child = spawn(pythonCmd, ['-c', code], { shell: true, timeout: 15000 });
+        const child = spawn(pythonCmd, ['-c', code], { shell: false, windowsHide: true, timeout: 15000 });
         
         if (signal) {
             signal.addEventListener('abort', () => {

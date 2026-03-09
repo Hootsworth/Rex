@@ -8,7 +8,6 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import Anthropic from '@anthropic-ai/sdk';
 import gradient from 'gradient-string';
 import { spawn } from 'child_process';
-import util from 'util';
 import { LlamaChatSession } from 'node-llama-cpp';
 import { MODELS_DIR } from './config.js';
 
@@ -43,27 +42,29 @@ let openaiClientInstance = null;
 let openaiClientKey = '';
 
 
-const execPromise = util.promisify((cmd, cb) => {
-    const child = spawn(cmd, { shell: true });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', d => stdout += d);
-    child.stderr.on('data', d => stderr += d);
-    child.on('close', code => cb(code ? new Error(stderr) : null, stdout));
-});
-
 export async function checkOllamaStatus() {
-    try {
-        const { stdout } = await execPromise('ollama --version');
-        return stdout.toLowerCase().includes('ollama version');
-    } catch (err) {
-        return false;
-    }
+    return new Promise((resolve) => {
+        try {
+            const child = spawn('ollama', ['--version'], { shell: false, windowsHide: true });
+            let stdout = '';
+
+            child.stdout.on('data', (d) => {
+                stdout += d.toString();
+            });
+
+            child.on('error', () => resolve(false));
+            child.on('close', (code) => {
+                resolve(code === 0 && stdout.toLowerCase().includes('ollama version'));
+            });
+        } catch {
+            resolve(false);
+        }
+    });
 }
 
 export async function queryOllama(prompt, model = 'llama3:latest', signal = null) {
     return new Promise((resolve, reject) => {
-        const child = spawn('ollama', ['run', model], { shell: true, stdio: ['pipe', 'pipe', 'pipe'] });
+        const child = spawn('ollama', ['run', model], { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
         let output = '';
 
         if (signal) {

@@ -13,6 +13,7 @@ import { aiFileTranslator } from './translator.js';
 import { projectScaffold } from './projectScaffold.js';
 import { deployTools } from './deployTools.js';
 import { regexTools } from './regexTools.js';
+import { runDoctor } from './doctor.js';
 import CFonts from 'cfonts';
 import updateNotifier from 'update-notifier';
 import { createRequire } from 'module';
@@ -175,6 +176,25 @@ async function main() {
         .action(async () => {
             const { projectHealth } = await import('./health.js');
             await projectHealth();
+            process.exit(0);
+        });
+
+    program
+        .command('doctor')
+        .description('Secure diagnostics with optional safe-fix and verification')
+        .option('--apply-safe', 'Apply safe baseline fixes if files are missing')
+        .option('--verify', 'Run lint/test/build scripts when available')
+        .option('--ai', 'Use minimal-context AI remediation recommendations')
+        .option('--commit', 'Create a local commit for doctor-applied fixes')
+        .option('-y, --yes', 'Assume yes for confirmations')
+        .action(async (opts) => {
+            await runDoctor({
+                applySafe: opts.applySafe,
+                verify: opts.verify,
+                ai: opts.ai,
+                commit: opts.commit,
+                yes: opts.yes,
+            });
             process.exit(0);
         });
 
@@ -526,6 +546,7 @@ async function runInteractiveMenu() {
                         message: `${g.arrow} Project Studio`,
                         options: [
                             { value: 'health', label: menuLabel('HLT', 'Project Health Scan') },
+                            { value: 'doctor', label: menuLabel('DOC', 'Doctor (Secure Diagnose + Fix)') },
                             { value: 'scaffold', label: menuLabel('SCA', 'Quick File Scaffold') },
                             { value: 'project_scaffold', label: menuLabel('BLD', 'Full Project Scaffold') },
                             { value: 'env', label: menuLabel('ENV', 'Env Secret Generator') },
@@ -536,6 +557,7 @@ async function runInteractiveMenu() {
                     if (p.isCancel(projAction) || projAction === 'back') break;
 
                     if (projAction === 'health') { const { projectHealth } = await import('./health.js'); await projectHealth(); }
+                    if (projAction === 'doctor') await runDoctor();
                     if (projAction === 'scaffold') await quickScaffold();
                     if (projAction === 'project_scaffold') await projectScaffold();
                     if (projAction === 'env') { const { generateEnvExample } = await import('./env.js'); await generateEnvExample(); }
@@ -772,6 +794,7 @@ async function showComprehensiveHelp(program) {
             title: '🏗️ Project & Dev Tools',
             commands: [
                 { cmd: 'rexai health', desc: 'Scan project health, deps, and quality' },
+                { cmd: 'rexai doctor', desc: 'Secure diagnose, safe-fix, verify workflow' },
                 { cmd: 'rexai scaffold', desc: 'Quickly generate a single file/component' },
                 { cmd: 'rexai project-scaffold', desc: 'Generate a full project boilerplate' },
                 { cmd: 'rexai env', desc: 'Generate .env.example from .env' },

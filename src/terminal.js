@@ -6,6 +6,7 @@ import { exec } from 'child_process';
 import util from 'util';
 import os from 'os';
 import { loadConfig } from './config.js';
+import { validateCommandPolicy } from './commandPolicy.js';
 
 import fs from 'fs';
 import path from 'path';
@@ -154,6 +155,13 @@ Return EXACTLY THIS FORMAT if you need clarification:
 
         // Run action
         try {
+            const policy = validateCommandPolicy(generatedCommand, { enforceSafeMode: false });
+            if (!policy.safe) {
+                p.log.error(`Blocked by command policy: ${policy.reason}`);
+                memoryOptions = `The previous command was blocked by policy (${policy.reason}). Provide a safer alternative.`;
+                continue;
+            }
+
             s.start(`Executing: ${pc.cyan(generatedCommand)}`);
             const { stdout, stderr } = await execPromise(generatedCommand);
             s.stop(pc.green('Execution complete.'));
@@ -187,6 +195,13 @@ export async function runWithHealing(cmdString) {
     let stdout = '';
     let stderr = '';
     try {
+        const policy = validateCommandPolicy(cmdString, { enforceSafeMode: false });
+        if (!policy.safe) {
+            s.stop(pc.red('Command blocked by policy.'));
+            console.error(pc.dim(policy.reason));
+            return;
+        }
+
         s.start(`Running: ${pc.cyan(cmdString)}`);
         const result = await execPromise(cmdString);
         stdout = result.stdout || '';

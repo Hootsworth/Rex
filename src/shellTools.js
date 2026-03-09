@@ -2,53 +2,10 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
-
-// A list of dangerous commands or flags that Rex is NEVER allowed to run, even in Auto-Pilot
-const DANGEROUS_COMMANDS = [
-    /rm\s+-rf\s+\//i, // Root deletion
-    /rm\s+-rf\s+\.\./i, // Upward deletion
-    /mkfs/i, // Formatting disks
-    /dd\s+if=/i, // Disk cloning
-    />\s*\/dev\/(sda|hda|nvme)/i, // Writing directly to block devices
-    /:\(\)\{ :\|:& \};:/i, // Fork bomb
-    /chmod\s+-R\s+777\s+\//i, // Root permission wipe
-    /chown\s+-R\s+.*:\s*\//i, // Root ownership wipe
-    /remove-item\s+.*-recurse\s+.*-force\s+(c:|\\)/i, // PowerShell destructive delete at root
-    /del\s+\/?[sqf]*\s+.*(c:\\|\\)/i, // CMD recursive delete at root-ish path
-    /format\s+[a-z]:/i, // Windows volume format
-    /net\s+user\s+.*\/add/i, // Creating users
-    /net\s+localgroup\s+administrators\s+.*\/add/i, // Adding to admin group
-    /sc\s+delete/i, // Deleting services
-    /reg\s+delete/i, // Deleting registry keys
-    /powershell.*-ExecutionPolicy\s+Bypass/i, // Bypassing execution policy
-    /curl.*\|\s*sh/i, // Piping curl to sh (common malware vector)
-    /wget.*\|\s*sh/i // Piping wget to sh
-];
-
-let safeMode = true; // Default to true for safety
+import { validateCommandPolicy, setCommandSafeMode } from './commandPolicy.js';
 
 export function setSafeMode(enabled) {
-    safeMode = enabled;
-}
-
-const COMMAND_WHITELIST = [
-    'ls', 'dir', 'cd', 'pwd', 'mkdir', 'touch', 'echo', 'git', 'npm', 'node', 'python', 'py', 'cat', 'type', 'grep', 'findstr', 'status', 'health', 'system'
-];
-
-function isCommandSafe(command) {
-    for (const pattern of DANGEROUS_COMMANDS) {
-        if (pattern.test(command)) return false;
-    }
-
-    if (safeMode) {
-        const baseCommand = command.trim().split(' ')[0].toLowerCase();
-        // Allow common safe commands and their variations (e.g., git status)
-        if (!COMMAND_WHITELIST.includes(baseCommand)) {
-            return { safe: false, reason: `SafeMode is ON. Command \`${baseCommand}\` is not in the whitelist.` };
-        }
-    }
-
-    return { safe: true };
+    setCommandSafeMode(enabled);
 }
 
 /**
@@ -62,9 +19,9 @@ export async function run_shell_command(command) {
                 return resolve('SECURITY EXCEPTION: Empty command blocked.');
             }
 
-            const safety = isCommandSafe(command);
+            const safety = validateCommandPolicy(command, { enforceSafeMode: true });
             if (!safety.safe) {
-                return resolve(`SECURITY EXCEPTION: ${safety.reason || `Command matching blacklisted dangerous patterns blocked.`}`);
+                return resolve(`SECURITY EXCEPTION: ${safety.reason || 'Command matching blacklisted dangerous patterns blocked.'}`);
             }
 
             const shell = process.platform === 'win32'

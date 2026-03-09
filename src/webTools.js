@@ -795,6 +795,183 @@ class BrowserManager {
 
 const manager = new BrowserManager();
 
+const PREFLGIHT_ANALYSE_PLOT_NAME = 'Preflgiht Analyse Plot';
+const PREFLIGHT_ANALYSE_PLOT_LIMIT = 1200;
+let preflightAnalysePlotCache = null;
+
+function getPreflightAnalysePlotPath() {
+    return path.join(process.cwd(), '.rex', 'preflight-analyse-plot.json');
+}
+
+function normalizeHostFromUrl(rawUrl = '') {
+    try {
+        const host = new URL(String(rawUrl || '').trim()).hostname.toLowerCase();
+        return host.startsWith('www.') ? host.slice(4) : host;
+    } catch {
+        return '';
+    }
+}
+
+function buildPlotIntent(action = '', args = {}) {
+    const base = normalizeForMatch(args.text || args.label || args.query || args.placeholder || args.role || 'generic');
+    const role = normalizeForMatch(args.role || '');
+    const anchor = normalizeForMatch(args.hrefContains || args.urlContains || '');
+    return `${normalizeForMatch(action || 'unknown')}|${base}|${role}|${anchor}`;
+}
+
+function ensurePreflightAnalysePlotDir() {
+    const dir = path.dirname(getPreflightAnalysePlotPath());
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function loadPreflightAnalysePlotStore() {
+    if (preflightAnalysePlotCache) return preflightAnalysePlotCache;
+
+    const filePath = getPreflightAnalysePlotPath();
+    try {
+        if (fs.existsSync(filePath)) {
+            const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            if (parsed && Array.isArray(parsed.entries)) {
+                preflightAnalysePlotCache = parsed;
+                return preflightAnalysePlotCache;
+            }
+        }
+    } catch {
+        // Corrupt store should not break browser actions.
+    }
+
+    preflightAnalysePlotCache = {
+        feature: PREFLGIHT_ANALYSE_PLOT_NAME,
+        schemaVersion: 1,
+        entries: [],
+        updatedAt: new Date().toISOString()
+    };
+    return preflightAnalysePlotCache;
+}
+
+function savePreflightAnalysePlotStore() {
+    try {
+        ensurePreflightAnalysePlotDir();
+        const store = loadPreflightAnalysePlotStore();
+        store.updatedAt = new Date().toISOString();
+        if (store.entries.length > PREFLIGHT_ANALYSE_PLOT_LIMIT) {
+            store.entries = store.entries
+                .sort((a, b) => (new Date(b.lastSuccessAt || b.lastSeenAt || 0).getTime() - new Date(a.lastSuccessAt || a.lastSeenAt || 0).getTime()))
+                .slice(0, PREFLIGHT_ANALYSE_PLOT_LIMIT);
+        }
+        fs.writeFileSync(getPreflightAnalysePlotPath(), JSON.stringify(store, null, 2), 'utf8');
+    } catch {
+        // Disk persistence issues are non-fatal.
+    }
+}
+
+function addPreflightAnalysePlotObservation({ pageUrl = '', action = '', args = {}, selector = '', candidate = null, success = true }) {
+    const host = normalizeHostFromUrl(pageUrl);
+    if (!host || !selector) return;
+
+    const intent = buildPlotIntent(action, args);
+    const store = loadPreflightAnalysePlotStore();
+    const key = `${host}::${intent}::${selector}`;
+    const now = new Date().toISOString();
+
+    let row = store.entries.find((x) => x.key === key);
+    if (!row) {
+        row = {
+            key,
+            host,
+            intent,
+            action: normalizeForMatch(action || 'unknown'),
+            selector,
+            id: String(candidate?.id || ''),
+            tag: String(candidate?.tag || ''),
+            role: String(candidate?.role || ''),
+            text: String(candidate?.text || '').slice(0, 180),
+            href: String(candidate?.href || '').slice(0, 220),
+            placeholder: String(candidate?.placeholder || '').slice(0, 120),
+            successCount: 0,
+            failCount: 0,
+            lastSeenAt: now,
+            lastSuccessAt: ''
+        };
+        store.entries.push(row);
+    }
+
+    row.lastSeenAt = now;
+    row.id = String(candidate?.id || row.id || '');
+    row.tag = String(candidate?.tag || row.tag || '');
+    row.role = String(candidate?.role || row.role || '');
+    row.text = String(candidate?.text || row.text || '').slice(0, 180);
+    row.href = String(candidate?.href || row.href || '').slice(0, 220);
+    row.placeholder = String(candidate?.placeholder || row.placeholder || '').slice(0, 120);
+
+    if (success) {
+        row.successCount = Number(row.successCount || 0) + 1;
+        row.lastSuccessAt = now;
+    } else {
+        row.failCount = Number(row.failCount || 0) + 1;
+    }
+
+    savePreflightAnalysePlotStore();
+}
+
+function getPreflightAnalysePlotBoost({ pageUrl = '', action = '', args = {}, candidate = null }) {
+    const host = normalizeHostFromUrl(pageUrl);
+    if (!host || !candidate) return { boost: 0, hits: 0 };
+
+    const intent = buildPlotIntent(action, args);
+    const store = loadPreflightAnalysePlotStore();
+    const cText = normalizeForMatch(candidate.text || '');
+    const cRole = normalizeForMatch(candidate.role || '');
+    const cTag = normalizeForMatch(candidate.tag || '');
+    const cHref = normalizeForMatch(candidate.href || '');
+    const cId = String(candidate.id || '');
+    const cSelector = String(candidate.selector || '');
+
+    let boost = 0;
+    let hits = 0;
+    for (const row of store.entries) {
+        if (row.host !== host) continue;
+        if (row.intent !== intent) continue;
+
+        let matched = false;
+        if (cSelector && row.selector && cSelector === row.selector) matched = true;
+        if (!matched && cId && row.id && cId === row.id) matched = true;
+        if (!matched && cTag && row.tag && cTag === normalizeForMatch(row.tag)) matched = true;
+        if (!matched && cRole && row.role && cRole === normalizeForMatch(row.role)) matched = true;
+        if (!matched && cHref && row.href && cHref && cHref.includes(normalizeForMatch(row.href))) matched = true;
+        if (!matched && cText && row.text && (cText === normalizeForMatch(row.text) || cText.includes(normalizeForMatch(row.text)))) matched = true;
+        if (!matched) continue;
+
+        const successCount = Number(row.successCount || 0);
+        const failCount = Number(row.failCount || 0);
+        const confidence = Math.max(0, successCount - failCount * 1.2);
+        boost += Math.min(42, 8 + confidence * 5);
+        hits += 1;
+    }
+
+    return { boost, hits };
+}
+
+function getPreflightAnalysePlotSummary(pageUrl = '', targetAction = '') {
+    const host = normalizeHostFromUrl(pageUrl);
+    const store = loadPreflightAnalysePlotStore();
+    const hostEntries = host ? store.entries.filter((x) => x.host === host) : [];
+    const totalSuccesses = hostEntries.reduce((sum, x) => sum + Number(x.successCount || 0), 0);
+    const totalFailures = hostEntries.reduce((sum, x) => sum + Number(x.failCount || 0), 0);
+
+    return {
+        feature: PREFLGIHT_ANALYSE_PLOT_NAME,
+        enabled: true,
+        filePath: getPreflightAnalysePlotPath(),
+        host,
+        targetAction: normalizeForMatch(targetAction || ''),
+        hostEntryCount: hostEntries.length,
+        hostSuccesses: totalSuccesses,
+        hostFailures: totalFailures,
+        totalEntryCount: store.entries.length
+    };
+}
+
 function normalizeForMatch(value) {
     return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
@@ -804,6 +981,9 @@ async function buildInteractiveSnapshot(page) {
         const selectors = 'button, a, input, textarea, select, [role="button"], [role="link"], [role="menuitem"], [role="option"], [role="tab"], [aria-haspopup], [onclick], [data-rex-id], [data-rex-nav-id]';
         const elements = Array.from(document.querySelectorAll(selectors));
         const out = [];
+
+        const extensionData = Array.isArray(window.__rexPreflightData) ? window.__rexPreflightData : [];
+        const metaById = new Map(extensionData.map((m) => [String(m?.id || ''), m]));
 
         const pickText = (el) => (
             el.innerText ||
@@ -826,6 +1006,15 @@ async function buildInteractiveSnapshot(page) {
             const name = el.getAttribute('name') || '';
             const placeholder = el.getAttribute('placeholder') || '';
             const text = pickText(el);
+            let parsedMeta = null;
+            try {
+                const rawMeta = el.getAttribute('data-rex-nav-meta');
+                if (rawMeta) parsedMeta = JSON.parse(rawMeta);
+            } catch {
+                parsedMeta = null;
+            }
+
+            const extMeta = parsedMeta || metaById.get(String(id || '')) || null;
 
             let selector = '';
             if (id) selector = `[data-rex-id="${id}"], [data-rex-nav-id="${id}"]`;
@@ -841,6 +1030,15 @@ async function buildInteractiveSnapshot(page) {
                 href,
                 name,
                 placeholder,
+                label: String(extMeta?.label || ''),
+                anchorHeading: String(extMeta?.anchorHeading || ''),
+                anchorSection: String(extMeta?.anchorSection || ''),
+                formIntent: extMeta?.formIntent && typeof extMeta.formIntent === 'object'
+                    ? extMeta.formIntent
+                    : { primary: '', tags: [] },
+                obstruction: extMeta?.obstruction && typeof extMeta.obstruction === 'object'
+                    ? extMeta.obstruction
+                    : { blocked: false },
                 inViewport,
                 y: rect.top
             });
@@ -855,16 +1053,50 @@ async function buildInteractiveSnapshot(page) {
     });
 }
 
+function inferFormIntentNeedles(args = {}) {
+    const bag = normalizeForMatch([
+        args.text,
+        args.label,
+        args.query,
+        args.placeholder,
+        args.targetText,
+        args.heading,
+        args.section
+    ].filter(Boolean).join(' '));
+
+    const out = new Set();
+    if (!bag) return out;
+    if (/\bemail\b/.test(bag) || /@/.test(String(args.text || ''))) out.add('email');
+    if (/\b(pass|password|otp|pin|2fa|code)\b/.test(bag)) out.add('password');
+    if (/\b(search|find|lookup|query)\b/.test(bag)) out.add('search');
+    if (/\b(address|street|city|state|zip|postal|country|shipping|billing)\b/.test(bag)) out.add('address');
+    if (/\b(phone|mobile|tel|contact)\b/.test(bag)) out.add('phone');
+    if (/\bname|first|last|full name\b/.test(bag)) out.add('name');
+    return out;
+}
+
 function scoreTargetCandidate(candidate, args) {
     const textNeedle = normalizeForMatch(args.text || args.label || args.query || '');
     const hrefNeedle = normalizeForMatch(args.hrefContains || args.urlContains || '');
     const roleNeedle = normalizeForMatch(args.role || '');
     const placeholderNeedle = normalizeForMatch(args.placeholder || '');
+    const headingNeedle = normalizeForMatch(args.heading || args.contextHeading || '');
+    const sectionNeedle = normalizeForMatch(args.section || args.contextSection || '');
+    const labelNeedle = normalizeForMatch(args.label || args.targetText || '');
+    const action = normalizeForMatch(args.action || '');
 
     const cText = normalizeForMatch(candidate.text);
     const cHref = normalizeForMatch(candidate.href);
     const cRole = normalizeForMatch(candidate.role);
     const cPlaceholder = normalizeForMatch(candidate.placeholder);
+    const cHeading = normalizeForMatch(candidate.anchorHeading || '');
+    const cSection = normalizeForMatch(candidate.anchorSection || '');
+    const cLabel = normalizeForMatch(candidate.label || '');
+    const cIntentPrimary = normalizeForMatch(candidate.formIntent?.primary || '');
+    const cIntentTags = Array.isArray(candidate.formIntent?.tags)
+        ? candidate.formIntent.tags.map((t) => normalizeForMatch(t)).filter(Boolean)
+        : [];
+    const intentNeedles = inferFormIntentNeedles(args);
 
     let score = 0;
     if (candidate.inViewport) score += 20;
@@ -889,6 +1121,34 @@ function scoreTargetCandidate(candidate, args) {
         else if (cPlaceholder.includes(placeholderNeedle)) score += 35;
     }
 
+    if (headingNeedle) {
+        if (cHeading === headingNeedle) score += 34;
+        else if (cHeading.includes(headingNeedle)) score += 22;
+    }
+
+    if (sectionNeedle) {
+        if (cSection === sectionNeedle) score += 30;
+        else if (cSection.includes(sectionNeedle)) score += 18;
+    }
+
+    if (labelNeedle) {
+        if (cLabel === labelNeedle) score += 40;
+        else if (cLabel.includes(labelNeedle)) score += 24;
+    }
+
+    if ((action === 'type' || action === 'fill') && intentNeedles.size > 0) {
+        for (const need of intentNeedles) {
+            if (cIntentPrimary === need) score += 36;
+            else if (cIntentTags.includes(need)) score += 28;
+        }
+    }
+
+    if (candidate.obstruction?.blocked) {
+        score -= 110;
+        if (normalizeForMatch(candidate.obstruction?.by || '').includes('cookie')) score -= 8;
+        if (normalizeForMatch(candidate.obstruction?.byTag || '') === 'dialog') score -= 12;
+    }
+
     if (args.preferLinks && candidate.tag === 'a') score += 20;
     if (args.preferButtons && (candidate.tag === 'button' || cRole === 'button')) score += 20;
     return score;
@@ -909,13 +1169,25 @@ async function resolveTargetSelector(page, args = {}) {
         return { ok: false, error: 'No interactive elements detected on page.' };
     }
 
+    const currentUrl = page.url() || '';
+    const action = String(args.action || '').trim().toLowerCase();
+
     let best = null;
     let bestScore = -1;
+    let bestPlotHits = 0;
     for (const candidate of snapshot) {
-        const score = scoreTargetCandidate(candidate, args);
+        const baseScore = scoreTargetCandidate(candidate, args);
+        const plot = getPreflightAnalysePlotBoost({
+            pageUrl: currentUrl,
+            action,
+            args,
+            candidate
+        });
+        const score = baseScore + plot.boost;
         if (score > bestScore) {
             bestScore = score;
             best = candidate;
+            bestPlotHits = plot.hits;
         }
     }
 
@@ -932,7 +1204,7 @@ async function resolveTargetSelector(page, args = {}) {
     return {
         ok: true,
         selector,
-        reason: `resolved by semantic match (${best.tag}, score=${bestScore})`,
+        reason: `resolved by semantic match (${best.tag}, score=${bestScore}, plotHits=${bestPlotHits})`,
         candidate: best
     };
 }
@@ -1002,9 +1274,16 @@ async function robustHover(page, selector) {
     }
 }
 
+const VISUAL_CURSOR_DEFAULT_SVG = `<svg height="32" viewBox="0 0 32 32" width="32" xmlns="http://www.w3.org/2000/svg"><g fill="none" fill-rule="evenodd" transform="translate(10 7)"><path d="m6.148 18.473 1.863-1.003 1.615-.839-2.568-4.816h4.332l-11.379-11.408v16.015l3.316-3.221z" fill="#fff"/><path d="m6.431 17 1.765-.941-2.775-5.202h3.604l-8.025-8.043v11.188l2.53-2.442z" fill="#000"/></g></svg>`;
+const VISUAL_CURSOR_HANDOPEN_SVG = `<svg height="32" viewBox="0 0 32 32" width="32" xmlns="http://www.w3.org/2000/svg"><g fill="none" fill-rule="evenodd" transform="translate(7 6)"><path d="m4.5557 8.5742c-.098-.375-.196-.847-.406-1.552-.167-.557-.342-.859-.47-1.233-.155-.455-.303-.721-.496-1.181-.139-.329-.364-1.048-.457-1.44-.119-.509.033-.924.244-1.206.253-.339.962-.49 1.357-.351.371.13.744.512.916.788.288.46.357.632.717 1.542.393.992.564 1.918.611 2.231l.085.452c-.001-.04-.043-1.122-.044-1.162-.035-1.029-.06-1.823-.038-2.939.002-.126.064-.587.084-.715.078-.5.305-.8.673-.979.412-.201.926-.215 1.401-.017.423.173.626.55.687 1.022.014.109.094.987.093 1.107-.013 1.025.006 1.641.015 2.174.004.231.003 1.625.017 1.469.061-.656.094-3.189.344-3.942.144-.433.405-.746.794-.929.431-.203 1.113-.07 1.404.243.285.305.446.692.482 1.153.032.405-.019.897-.02 1.245 0 .867-.021 1.324-.037 2.121-.001.038-.015.298.023.182.094-.28.188-.542.266-.745.049-.125.241-.614.359-.859.114-.234.211-.369.415-.688.2-.313.415-.448.668-.561.54-.235 1.109.112 1.301.591.086.215.009.713-.028 1.105-.061.647-.254 1.306-.352 1.648-.128.447-.274 1.235-.34 1.601-.072.394-.234 1.382-.359 1.82-.086.301-.371.978-.652 1.384 0 0-1.074 1.25-1.192 1.812-.117.563-.078.567-.101.965-.024.399.121.923.121.923s-.802.104-1.234.034c-.391-.062-.875-.841-1-1.078-.172-.328-.539-.265-.682-.023-.225.383-.709 1.07-1.051 1.113-.668.084-2.054.03-3.139.02 0 0 .185-1.011-.227-1.358-.305-.26-.83-.784-1.144-1.06l-.832-.921c-.284-.36-.629-1.093-1.243-1.985-.348-.504-1.027-1.085-1.284-1.579-.223-.425-.331-.954-.19-1.325.225-.594.675-.897 1.362-.832.519.05.848.206 1.238.537.225.19.573.534.75.748.163.195.203.276.377.509.23.307.302.459.214.121" fill="#fff"/><g stroke="#000" stroke-linecap="round" stroke-width=".75"><path d="m4.5557 8.5742c-.098-.375-.196-.847-.406-1.552-.167-.557-.342-.859-.47-1.233-.155-.455-.303-.721-.496-1.181-.139-.329-.364-1.048-.457-1.44-.119-.509.033-.924.244-1.206.253-.339.962-.49 1.357-.351.371.13.744.512.916.788.288.46.357.632.717 1.542.393.992.564 1.918.611 2.231l.085.452c-.001-.04-.043-1.122-.044-1.162-.035-1.029-.06-1.823-.038-2.939.002-.126.064-.587.084-.715.078-.5.305-.8.673-.979.412-.201.926-.215 1.401-.017.423.173.626.55.687 1.022.014.109.094.987.093 1.107-.013 1.025.006 1.641.015 2.174.004.231.003 1.625.017 1.469.061-.656.094-3.189.344-3.942.144-.433.405-.746.794-.929.431-.203 1.113-.07 1.404.243.285.305.446.692.482 1.153.032.405-.019.897-.02 1.245 0 .867-.021 1.324-.037 2.121-.001.038-.015.298.023.182.094-.28.188-.542.266-.745.049-.125.241-.614.359-.859.114-.234.211-.369.415-.688.2-.313.415-.448.668-.561.54-.235 1.109.112 1.301.591.086.215.009.713-.028 1.105-.061.647-.254 1.306-.352 1.648-.128.447-.274 1.235-.34 1.601-.072.394-.234 1.382-.359 1.82-.086.301-.371.978-.652 1.384 0 0-1.074 1.25-1.192 1.812-.117.563-.078.567-.101.965-.024.399.121.923.121.923s-.802.104-1.234.034c-.391-.062-.875-.841-1-1.078-.172-.328-.539-.265-.682-.023-.225.383-.709 1.07-1.051 1.113-.668.084-2.054.03-3.139.02 0 0 .185-1.011-.227-1.358-.305-.26-.83-.784-1.144-1.06l-.832-.921c-.284-.36-.629-1.093-1.243-1.985-.348-.504-1.027-1.085-1.284-1.579-.223-.425-.331-.954-.19-1.325.225-.594.675-.897 1.362-.832.519.05.848.206 1.238.537.225.19.573.534.75.748.163.195.203.276.377.509.23.307.302.459.214.121" stroke-linejoin="round"/><path d="m11.566 12.734v-3.459"/><path d="m9.551 12.746-.016-3.473"/><path d="m7.555 9.305.021 3.426"/></g></g></svg>`;
+
 async function ensureVisualCursor(page) {
-    await page.evaluate(() => {
-        if (window.__rex_visual_cursor) return;
+    await page.evaluate(({ defaultCursorSvg, selectingCursorSvg }) => {
+        if (window.__rex_visual_cursor?.version === 2) return;
+        if (window.__rex_visual_cursor?.host && window.__rex_visual_cursor.host.isConnected) {
+            window.__rex_visual_cursor.host.remove();
+        }
+        window.__rex_visual_cursor = null;
 
         const styleId = 'rex-visual-cursor-style';
         if (!document.getElementById(styleId)) {
@@ -1020,33 +1299,20 @@ async function ensureVisualCursor(page) {
                     z-index: 2147483647;
                     pointer-events: none;
                 }
-                .rex-visual-cursor-core,
-                .rex-visual-cursor-ring {
+                .rex-visual-cursor-icon {
                     position: absolute;
-                    transform: translate(-50%, -50%);
-                    border-radius: 999px;
+                    left: 0;
+                    top: 0;
+                    width: 32px;
+                    height: 32px;
+                    transform: translate(-4px, -3px);
+                    transform-origin: 10px 7px;
+                    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
+                    transition: transform 140ms ease, filter 140ms ease;
                 }
-                .rex-visual-cursor-core {
-                    width: 10px;
-                    height: 10px;
-                    background: #c9ccd4;
-                    border: 1px solid #8a8f9c;
-                }
-                .rex-visual-cursor-ring {
-                    width: 18px;
-                    height: 18px;
-                    border: 1.2px solid rgba(173, 178, 189, 0.85);
-                    opacity: 0.35;
-                    transition: transform 150ms ease, opacity 150ms ease, border-color 150ms ease;
-                }
-                .rex-visual-cursor.clicking .rex-visual-cursor-ring {
-                    transform: translate(-50%, -50%) scale(2.05);
-                    border-color: rgba(176, 181, 192, 0.9);
-                    opacity: 0.75;
-                }
-                .rex-visual-cursor.clicking .rex-visual-cursor-core {
-                    background: #d2d5dd;
-                    border-color: #969baa;
+                .rex-visual-cursor.selecting .rex-visual-cursor-icon {
+                    transform: translate(-4px, -3px) scale(0.95);
+                    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.4));
                 }
             `;
             document.documentElement.appendChild(style);
@@ -1054,12 +1320,36 @@ async function ensureVisualCursor(page) {
 
         const el = document.createElement('div');
         el.className = 'rex-visual-cursor';
-        const core = document.createElement('div');
-        core.className = 'rex-visual-cursor-core';
-        const ring = document.createElement('div');
-        ring.className = 'rex-visual-cursor-ring';
-        el.appendChild(core);
-        el.appendChild(ring);
+        const parseSvg = (svgMarkup) => {
+            const tpl = document.createElement('template');
+            tpl.innerHTML = String(svgMarkup || '').trim();
+            const node = tpl.content.firstElementChild;
+            if (!node || String(node.tagName || '').toLowerCase() !== 'svg') return null;
+            node.classList.add('rex-visual-cursor-icon');
+            node.setAttribute('aria-hidden', 'true');
+            return node;
+        };
+
+        const defaultIcon = parseSvg(defaultCursorSvg);
+        const selectingIcon = parseSvg(selectingCursorSvg) || parseSvg(defaultCursorSvg);
+        if (defaultIcon) el.appendChild(defaultIcon);
+        if (selectingIcon) {
+            selectingIcon.style.display = 'none';
+            el.appendChild(selectingIcon);
+        }
+
+        if (!defaultIcon) {
+            const fallback = document.createElement('div');
+            fallback.className = 'rex-visual-cursor-icon';
+            fallback.style.borderRadius = '999px';
+            fallback.style.background = '#d0d4dc';
+            fallback.style.border = '1px solid #969baa';
+            fallback.style.width = '10px';
+            fallback.style.height = '10px';
+            fallback.style.transform = 'translate(-50%, -50%)';
+            el.appendChild(fallback);
+        }
+
         document.documentElement.appendChild(el);
 
         const state = {
@@ -1067,6 +1357,14 @@ async function ensureVisualCursor(page) {
             y: Math.round(window.innerHeight * 0.5),
             raf: null
         };
+
+        const setSelecting = (isSelecting) => {
+            if (defaultIcon) defaultIcon.style.display = isSelecting ? 'none' : 'block';
+            if (selectingIcon) selectingIcon.style.display = isSelecting ? 'block' : 'none';
+            el.classList.toggle('selecting', isSelecting);
+        };
+
+        setSelecting(false);
 
         const setPos = (x, y) => {
             state.x = Math.max(8, Math.min(window.innerWidth - 8, x));
@@ -1104,8 +1402,10 @@ async function ensureVisualCursor(page) {
         });
 
         const clickPulse = () => {
-            el.classList.add('clicking');
-            window.setTimeout(() => el.classList.remove('clicking'), 170);
+            setSelecting(true);
+            window.setTimeout(() => {
+                setSelecting(false);
+            }, 170);
         };
 
         const park = (side = 'auto') => {
@@ -1116,11 +1416,16 @@ async function ensureVisualCursor(page) {
         };
 
         window.__rex_visual_cursor = {
+            version: 2,
+            host: el,
             moveTo,
             clickPulse,
             park,
             current: () => ({ x: state.x, y: state.y })
         };
+    }, {
+        defaultCursorSvg: VISUAL_CURSOR_DEFAULT_SVG,
+        selectingCursorSvg: VISUAL_CURSOR_HANDOPEN_SVG
     }).catch(() => {});
 }
 
@@ -1683,6 +1988,10 @@ export async function browser_interact(args, signal = null) {
                 extensionPath: manager.extensionPath || ''
             };
 
+            const plotSummary = getPreflightAnalysePlotSummary(health.url, targetAction);
+            report.preflgihtAnalysePlot = plotSummary;
+            report.preflightAnalysePlot = plotSummary;
+
             if (health.url && health.url !== 'about:blank') {
                 manager.lastHealthyUrl = health.url;
             }
@@ -1702,6 +2011,7 @@ export async function browser_interact(args, signal = null) {
         }
         if (action === 'scan' || action === 'analyze_page') {
             const snapshot = await buildInteractiveSnapshot(page);
+            const plotSummary = getPreflightAnalysePlotSummary(page.url() || '', 'analyze_page');
             const summary = {
                 feature: 'Preflight Analyse',
                 page: {
@@ -1713,7 +2023,9 @@ export async function browser_interact(args, signal = null) {
                 extensionAssist: {
                     enabled: manager.usingExtension,
                     extensionPath: manager.extensionPath || ''
-                }
+                },
+                preflgihtAnalysePlot: plotSummary,
+                preflightAnalysePlot: plotSummary
             };
             return `Page Interaction Scan:\n${JSON.stringify(summary, null, 2)}`;
         }
@@ -1790,6 +2102,7 @@ export async function browser_interact(args, signal = null) {
             result = `${recoveryPrefix}Searched for "${searchQuery}". Title: "${title}". URL: ${searchRes.url}`;
         } else if (action === 'click') {
             const resolved = await resolveTargetSelector(page, {
+                action,
                 selector,
                 id,
                 text,
@@ -1809,8 +2122,24 @@ export async function browser_interact(args, signal = null) {
 
             const clicked = await robustClick(page, resolvedSelector);
             if (!clicked.ok) {
+                addPreflightAnalysePlotObservation({
+                    pageUrl: page.url() || '',
+                    action,
+                    args,
+                    selector: resolvedSelector,
+                    candidate: resolved.candidate,
+                    success: false
+                });
                 return `Error: click failed after retries on ${resolvedSelector}. ${clicked.error}`;
             }
+            addPreflightAnalysePlotObservation({
+                pageUrl: page.url() || '',
+                action,
+                args,
+                selector: resolvedSelector,
+                candidate: resolved.candidate,
+                success: true
+            });
             await cursorClickPulse(page);
             const settled = await settleAfterInteraction(page, { interaction: 'click', popupClicks: 2, dropdownWaitMs: 320 });
             manager.lastHealthyUrl = page.url() || manager.lastHealthyUrl;
@@ -1819,6 +2148,7 @@ export async function browser_interact(args, signal = null) {
         } else if (action === 'type') {
             if (typeof text !== 'string') return 'Error: type action requires text.';
             const resolved = await resolveTargetSelector(page, {
+                action,
                 selector,
                 id,
                 text: args.targetText || args.label,
@@ -1836,8 +2166,24 @@ export async function browser_interact(args, signal = null) {
 
             const typed = await robustType(page, resolvedSelector, text, args.pressEnter !== false);
             if (!typed.ok) {
+                addPreflightAnalysePlotObservation({
+                    pageUrl: page.url() || '',
+                    action,
+                    args,
+                    selector: resolvedSelector,
+                    candidate: resolved.candidate,
+                    success: false
+                });
                 return `Error: type failed after retries on ${resolvedSelector}. ${typed.error}`;
             }
+            addPreflightAnalysePlotObservation({
+                pageUrl: page.url() || '',
+                action,
+                args,
+                selector: resolvedSelector,
+                candidate: resolved.candidate,
+                success: true
+            });
             await cursorClickPulse(page);
             const settled = await settleAfterInteraction(page, { interaction: 'type', popupClicks: 2, dropdownWaitMs: 260 });
             manager.lastHealthyUrl = page.url() || manager.lastHealthyUrl;
@@ -1845,6 +2191,7 @@ export async function browser_interact(args, signal = null) {
             result = `${recoveryPrefix}Typed into ${resolvedSelector} (${resolved.reason}; ${typed.mode}${suffix})`;
         } else if (action === 'hover') {
             const resolved = await resolveTargetSelector(page, {
+                action,
                 selector,
                 id,
                 text,
@@ -1862,8 +2209,24 @@ export async function browser_interact(args, signal = null) {
 
             const hovered = await robustHover(page, resolvedSelector);
             if (!hovered.ok) {
+                addPreflightAnalysePlotObservation({
+                    pageUrl: page.url() || '',
+                    action,
+                    args,
+                    selector: resolvedSelector,
+                    candidate: resolved.candidate,
+                    success: false
+                });
                 return `Error: hover failed after retries on ${resolvedSelector}. ${hovered.error}`;
             }
+            addPreflightAnalysePlotObservation({
+                pageUrl: page.url() || '',
+                action,
+                args,
+                selector: resolvedSelector,
+                candidate: resolved.candidate,
+                success: true
+            });
             const settled = await settleAfterInteraction(page, { interaction: 'hover', popupClicks: 1, dropdownWaitMs: 300 });
             manager.lastHealthyUrl = page.url() || manager.lastHealthyUrl;
             const suffix = settled.note ? `; ${settled.note}` : '';

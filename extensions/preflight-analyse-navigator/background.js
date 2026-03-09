@@ -1,7 +1,11 @@
 const DEFAULT_STATE = {
   enabled: true,
   annotate: true,
-  pulseMs: 1200
+  pulseMs: 1200,
+  enableAnchors: true,
+  enableMutationDelta: true,
+  enableObstructionMap: true,
+  enableFormIntent: true
 };
 
 chrome.runtime.onInstalled.addListener(async () => {
