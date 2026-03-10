@@ -186,6 +186,48 @@ export async function runCompletion(messages, signal = null, complexity = 'high'
     }
 }
 
+export async function runCompletionWithTarget(messages, target = {}, signal = null) {
+    if (typeof signal === 'boolean') signal = null;
+
+    const config = loadConfig();
+    const formattedMessages = Array.isArray(messages) ? messages : [{ role: 'user', content: messages }];
+    const provider = String(target.provider || '').toLowerCase();
+    const model = String(target.model || '').trim();
+
+    if (!provider || !model) {
+        return await runCompletion(formattedMessages, signal, 'high');
+    }
+
+    if (provider === 'openai') {
+        if (!config.openaiKey) throw new Error('OpenAI key is missing! Please configure it in Settings.');
+        const openai = getOpenAIClient(config.openaiKey);
+        const response = await createOpenAICompletionWithRetry(openai, {
+            model,
+            messages: formattedMessages,
+        }, signal);
+        return extractOpenAIText(response);
+    }
+
+    if (provider === 'gemini') {
+        if (!config.geminiKey) throw new Error('Gemini key is missing! Please configure it in Settings.');
+        if (signal?.aborted) throw new Error('Aborted');
+        const genAI = new GoogleGenerativeAI(config.geminiKey);
+        const gm = genAI.getGenerativeModel({ model });
+        const combinedPrompt = formattedMessages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
+
+        const resultPromise = gm.generateContent(combinedPrompt);
+        const abortPromise = signal ? new Promise((_, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('Aborted')), { once: true });
+        }) : null;
+
+        const result = abortPromise ? await Promise.race([resultPromise, abortPromise]) : await resultPromise;
+        return result.response.text();
+    }
+
+    // Unsupported target provider: fall back to default routing.
+    return await runCompletion(formattedMessages, signal, 'high');
+}
+
 function getOpenAIClient(apiKey) {
     if (!openaiClientInstance || openaiClientKey !== apiKey) {
         openaiClientInstance = new OpenAI({ apiKey });

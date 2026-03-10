@@ -1277,9 +1277,45 @@ async function robustHover(page, selector) {
 const VISUAL_CURSOR_DEFAULT_SVG = `<svg height="32" viewBox="0 0 32 32" width="32" xmlns="http://www.w3.org/2000/svg"><g fill="none" fill-rule="evenodd" transform="translate(10 7)"><path d="m6.148 18.473 1.863-1.003 1.615-.839-2.568-4.816h4.332l-11.379-11.408v16.015l3.316-3.221z" fill="#fff"/><path d="m6.431 17 1.765-.941-2.775-5.202h3.604l-8.025-8.043v11.188l2.53-2.442z" fill="#000"/></g></svg>`;
 const VISUAL_CURSOR_HANDOPEN_SVG = `<svg height="32" viewBox="0 0 32 32" width="32" xmlns="http://www.w3.org/2000/svg"><g fill="none" fill-rule="evenodd" transform="translate(7 6)"><path d="m4.5557 8.5742c-.098-.375-.196-.847-.406-1.552-.167-.557-.342-.859-.47-1.233-.155-.455-.303-.721-.496-1.181-.139-.329-.364-1.048-.457-1.44-.119-.509.033-.924.244-1.206.253-.339.962-.49 1.357-.351.371.13.744.512.916.788.288.46.357.632.717 1.542.393.992.564 1.918.611 2.231l.085.452c-.001-.04-.043-1.122-.044-1.162-.035-1.029-.06-1.823-.038-2.939.002-.126.064-.587.084-.715.078-.5.305-.8.673-.979.412-.201.926-.215 1.401-.017.423.173.626.55.687 1.022.014.109.094.987.093 1.107-.013 1.025.006 1.641.015 2.174.004.231.003 1.625.017 1.469.061-.656.094-3.189.344-3.942.144-.433.405-.746.794-.929.431-.203 1.113-.07 1.404.243.285.305.446.692.482 1.153.032.405-.019.897-.02 1.245 0 .867-.021 1.324-.037 2.121-.001.038-.015.298.023.182.094-.28.188-.542.266-.745.049-.125.241-.614.359-.859.114-.234.211-.369.415-.688.2-.313.415-.448.668-.561.54-.235 1.109.112 1.301.591.086.215.009.713-.028 1.105-.061.647-.254 1.306-.352 1.648-.128.447-.274 1.235-.34 1.601-.072.394-.234 1.382-.359 1.82-.086.301-.371.978-.652 1.384 0 0-1.074 1.25-1.192 1.812-.117.563-.078.567-.101.965-.024.399.121.923.121.923s-.802.104-1.234.034c-.391-.062-.875-.841-1-1.078-.172-.328-.539-.265-.682-.023-.225.383-.709 1.07-1.051 1.113-.668.084-2.054.03-3.139.02 0 0 .185-1.011-.227-1.358-.305-.26-.83-.784-1.144-1.06l-.832-.921c-.284-.36-.629-1.093-1.243-1.985-.348-.504-1.027-1.085-1.284-1.579-.223-.425-.331-.954-.19-1.325.225-.594.675-.897 1.362-.832.519.05.848.206 1.238.537.225.19.573.534.75.748.163.195.203.276.377.509.23.307.302.459.214.121" fill="#fff"/><g stroke="#000" stroke-linecap="round" stroke-width=".75"><path d="m4.5557 8.5742c-.098-.375-.196-.847-.406-1.552-.167-.557-.342-.859-.47-1.233-.155-.455-.303-.721-.496-1.181-.139-.329-.364-1.048-.457-1.44-.119-.509.033-.924.244-1.206.253-.339.962-.49 1.357-.351.371.13.744.512.916.788.288.46.357.632.717 1.542.393.992.564 1.918.611 2.231l.085.452c-.001-.04-.043-1.122-.044-1.162-.035-1.029-.06-1.823-.038-2.939.002-.126.064-.587.084-.715.078-.5.305-.8.673-.979.412-.201.926-.215 1.401-.017.423.173.626.55.687 1.022.014.109.094.987.093 1.107-.013 1.025.006 1.641.015 2.174.004.231.003 1.625.017 1.469.061-.656.094-3.189.344-3.942.144-.433.405-.746.794-.929.431-.203 1.113-.07 1.404.243.285.305.446.692.482 1.153.032.405-.019.897-.02 1.245 0 .867-.021 1.324-.037 2.121-.001.038-.015.298.023.182.094-.28.188-.542.266-.745.049-.125.241-.614.359-.859.114-.234.211-.369.415-.688.2-.313.415-.448.668-.561.54-.235 1.109.112 1.301.591.086.215.009.713-.028 1.105-.061.647-.254 1.306-.352 1.648-.128.447-.274 1.235-.34 1.601-.072.394-.234 1.382-.359 1.82-.086.301-.371.978-.652 1.384 0 0-1.074 1.25-1.192 1.812-.117.563-.078.567-.101.965-.024.399.121.923.121.923s-.802.104-1.234.034c-.391-.062-.875-.841-1-1.078-.172-.328-.539-.265-.682-.023-.225.383-.709 1.07-1.051 1.113-.668.084-2.054.03-3.139.02 0 0 .185-1.011-.227-1.358-.305-.26-.83-.784-1.144-1.06l-.832-.921c-.284-.36-.629-1.093-1.243-1.985-.348-.504-1.027-1.085-1.284-1.579-.223-.425-.331-.954-.19-1.325.225-.594.675-.897 1.362-.832.519.05.848.206 1.238.537.225.19.573.534.75.748.163.195.203.276.377.509.23.307.302.459.214.121" stroke-linejoin="round"/><path d="m11.566 12.734v-3.459"/><path d="m9.551 12.746-.016-3.473"/><path d="m7.555 9.305.021 3.426"/></g></g></svg>`;
 
-async function ensureVisualCursor(page) {
-    await page.evaluate(({ defaultCursorSvg, selectingCursorSvg }) => {
-        if (window.__rex_visual_cursor?.version === 2) return;
+function loadCursorSvgAsset(name) {
+    try {
+        const filePath = path.join(process.cwd(), 'assets', `${String(name || '').toLowerCase()}.svg`);
+        if (fs.existsSync(filePath)) {
+            return fs.readFileSync(filePath, 'utf8');
+        }
+    } catch {
+        // Non-fatal fallback.
+    }
+    return '';
+}
+
+const VISUAL_CURSOR_STYLE_MAP = {
+    default: loadCursorSvgAsset('default') || VISUAL_CURSOR_DEFAULT_SVG,
+    handopen: loadCursorSvgAsset('handopen') || VISUAL_CURSOR_HANDOPEN_SVG,
+    handpointing: loadCursorSvgAsset('handpointing') || VISUAL_CURSOR_DEFAULT_SVG,
+    handgrabbing: loadCursorSvgAsset('handgrabbing') || VISUAL_CURSOR_HANDOPEN_SVG,
+    busy: loadCursorSvgAsset('busy') || VISUAL_CURSOR_DEFAULT_SVG,
+    beachball: loadCursorSvgAsset('beachball') || VISUAL_CURSOR_DEFAULT_SVG,
+    copy: loadCursorSvgAsset('copy') || VISUAL_CURSOR_DEFAULT_SVG
+};
+
+function pickBrowserCursorStyle(action = '') {
+    const a = String(action || '').toLowerCase();
+    if (a === 'click') return 'handpointing';
+    if (a === 'hover') return 'handopen';
+    if (a === 'type') return 'handgrabbing';
+    if (a === 'search' || a === 'navigate' || a === 'wait_for_auth') return 'beachball';
+    if (a === 'wait') return 'busy';
+    return 'default';
+}
+
+async function ensureVisualCursor(page, style = 'default') {
+    const desiredStyle = String(style || 'default').toLowerCase();
+    await page.evaluate(({ styleMap, desiredStyle }) => {
+        if (window.__rex_visual_cursor?.version === 3) {
+            window.__rex_visual_cursor.setStyle(desiredStyle);
+            return;
+        }
         if (window.__rex_visual_cursor?.host && window.__rex_visual_cursor.host.isConnected) {
             window.__rex_visual_cursor.host.remove();
         }
@@ -1330,15 +1366,18 @@ async function ensureVisualCursor(page) {
             return node;
         };
 
-        const defaultIcon = parseSvg(defaultCursorSvg);
-        const selectingIcon = parseSvg(selectingCursorSvg) || parseSvg(defaultCursorSvg);
-        if (defaultIcon) el.appendChild(defaultIcon);
-        if (selectingIcon) {
-            selectingIcon.style.display = 'none';
-            el.appendChild(selectingIcon);
+        const icons = {};
+        for (const [key, markup] of Object.entries(styleMap || {})) {
+            const icon = parseSvg(markup);
+            if (!icon) continue;
+            icon.style.display = 'none';
+            icons[key] = icon;
+            el.appendChild(icon);
         }
 
-        if (!defaultIcon) {
+        const hasAnyIcon = Object.keys(icons).length > 0;
+
+        if (!hasAnyIcon) {
             const fallback = document.createElement('div');
             fallback.className = 'rex-visual-cursor-icon';
             fallback.style.borderRadius = '999px';
@@ -1355,16 +1394,18 @@ async function ensureVisualCursor(page) {
         const state = {
             x: Math.round(window.innerWidth * 0.8),
             y: Math.round(window.innerHeight * 0.5),
-            raf: null
+            raf: null,
+            style: 'default'
         };
 
-        const setSelecting = (isSelecting) => {
-            if (defaultIcon) defaultIcon.style.display = isSelecting ? 'none' : 'block';
-            if (selectingIcon) selectingIcon.style.display = isSelecting ? 'block' : 'none';
-            el.classList.toggle('selecting', isSelecting);
+        const showOnly = (name) => {
+            const key = icons[name] ? name : (icons.default ? 'default' : Object.keys(icons)[0]);
+            for (const k of Object.keys(icons)) {
+                icons[k].style.display = k === key ? 'block' : 'none';
+            }
+            state.style = key || 'default';
+            return state.style;
         };
-
-        setSelecting(false);
 
         const setPos = (x, y) => {
             state.x = Math.max(8, Math.min(window.innerWidth - 8, x));
@@ -1402,11 +1443,15 @@ async function ensureVisualCursor(page) {
         });
 
         const clickPulse = () => {
-            setSelecting(true);
+            const before = state.style || 'default';
+            const pressed = icons.handgrabbing ? 'handgrabbing' : before;
+            showOnly(pressed);
             window.setTimeout(() => {
-                setSelecting(false);
+                showOnly(before);
             }, 170);
         };
+
+        const setStyle = (name) => showOnly(String(name || 'default').toLowerCase());
 
         const park = (side = 'auto') => {
             const sidePick = side === 'auto' ? (Math.random() > 0.5 ? 'left' : 'right') : side;
@@ -1416,47 +1461,53 @@ async function ensureVisualCursor(page) {
         };
 
         window.__rex_visual_cursor = {
-            version: 2,
+            version: 3,
             host: el,
             moveTo,
             clickPulse,
             park,
-            current: () => ({ x: state.x, y: state.y })
+            setStyle,
+            current: () => ({ x: state.x, y: state.y, style: state.style || 'default' })
         };
+
+        setStyle(desiredStyle);
     }, {
-        defaultCursorSvg: VISUAL_CURSOR_DEFAULT_SVG,
-        selectingCursorSvg: VISUAL_CURSOR_HANDOPEN_SVG
+        styleMap: VISUAL_CURSOR_STYLE_MAP,
+        desiredStyle
     }).catch(() => {});
 }
 
-async function cursorMoveToSelector(page, selector, duration = 260) {
-    await ensureVisualCursor(page);
-    await page.evaluate(async ({ sel, duration }) => {
+async function cursorMoveToSelector(page, selector, duration = 260, style = 'default') {
+    await ensureVisualCursor(page, style);
+    await page.evaluate(async ({ sel, duration, style }) => {
         const cursor = window.__rex_visual_cursor;
         if (!cursor) return;
+        cursor.setStyle(style);
         const el = document.querySelector(sel);
         if (!el) return;
         const rect = el.getBoundingClientRect();
         const x = rect.left + rect.width / 2;
         const y = rect.top + rect.height / 2;
         await cursor.moveTo(x, y, duration);
-    }, { sel: selector, duration }).catch(() => {});
+    }, { sel: selector, duration, style }).catch(() => {});
 }
 
-async function cursorClickPulse(page) {
-    await ensureVisualCursor(page);
-    await page.evaluate(() => {
+async function cursorClickPulse(page, style = 'handpointing') {
+    await ensureVisualCursor(page, style);
+    await page.evaluate(({ style }) => {
+        window.__rex_visual_cursor?.setStyle(style);
         window.__rex_visual_cursor?.clickPulse();
-    }).catch(() => {});
+    }, { style }).catch(() => {});
 }
 
-async function cursorParkIdle(page, side = 'auto') {
-    await ensureVisualCursor(page);
-    await page.evaluate(async ({ side }) => {
+async function cursorParkIdle(page, side = 'auto', style = 'default') {
+    await ensureVisualCursor(page, style);
+    await page.evaluate(async ({ side, style }) => {
         if (window.__rex_visual_cursor) {
+            window.__rex_visual_cursor.setStyle(style);
             await window.__rex_visual_cursor.park(side);
         }
-    }, { side }).catch(() => {});
+    }, { side, style }).catch(() => {});
 }
 
 function normalizeExtractedText(text) {
@@ -1912,7 +1963,7 @@ export async function browser_interact(args, signal = null) {
 
     try {
         const page = await manager.getPage();
-        await ensureVisualCursor(page);
+        await ensureVisualCursor(page, pickBrowserCursorStyle('default'));
         let result = '';
         let { action, url, selector, text, code, tabIndex, id } = args;
         action = String(action || '').trim().toLowerCase();
@@ -1933,11 +1984,11 @@ export async function browser_interact(args, signal = null) {
                 if (!recovered.ok) {
                     return `Error: back landed on about:blank and recovery failed: ${recovered.error}`;
                 }
-                await cursorParkIdle(page, 'auto');
+                await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
                 return `Navigated back, then recovered using ${recovered.strategy}. URL: ${recovered.url}`;
             }
             manager.lastHealthyUrl = page.url() || manager.lastHealthyUrl;
-            await cursorParkIdle(page, 'auto');
+            await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
             return `Navigated back to ${page.url()}`;
         }
         if (action === 'refresh') {
@@ -1947,11 +1998,11 @@ export async function browser_interact(args, signal = null) {
                 if (!recovered.ok) {
                     return `Error: refresh landed on about:blank and recovery failed: ${recovered.error}`;
                 }
-                await cursorParkIdle(page, 'auto');
+                await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
                 return `Reloaded page, then recovered using ${recovered.strategy}. URL: ${recovered.url}`;
             }
             manager.lastHealthyUrl = page.url() || manager.lastHealthyUrl;
-            await cursorParkIdle(page, 'auto');
+            await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
             return `Reloaded ${page.url()}`;
         }
         if (action === 'new' || action === 'new_tab') return await manager.newTab(url);
@@ -2118,7 +2169,7 @@ export async function browser_interact(args, signal = null) {
             const resolvedSelector = resolved.selector;
             await page.waitForSelector(resolvedSelector, { timeout: 8000 });
 
-            await cursorMoveToSelector(page, resolvedSelector, 250);
+            await cursorMoveToSelector(page, resolvedSelector, 250, pickBrowserCursorStyle('click'));
 
             const clicked = await robustClick(page, resolvedSelector);
             if (!clicked.ok) {
@@ -2140,7 +2191,7 @@ export async function browser_interact(args, signal = null) {
                 candidate: resolved.candidate,
                 success: true
             });
-            await cursorClickPulse(page);
+            await cursorClickPulse(page, pickBrowserCursorStyle('click'));
             const settled = await settleAfterInteraction(page, { interaction: 'click', popupClicks: 2, dropdownWaitMs: 320 });
             manager.lastHealthyUrl = page.url() || manager.lastHealthyUrl;
             const suffix = settled.note ? `; ${settled.note}` : '';
@@ -2162,7 +2213,7 @@ export async function browser_interact(args, signal = null) {
             const resolvedSelector = resolved.selector;
             await page.waitForSelector(resolvedSelector, { timeout: 8000 });
 
-            await cursorMoveToSelector(page, resolvedSelector, 230);
+            await cursorMoveToSelector(page, resolvedSelector, 230, pickBrowserCursorStyle('type'));
 
             const typed = await robustType(page, resolvedSelector, text, args.pressEnter !== false);
             if (!typed.ok) {
@@ -2184,7 +2235,7 @@ export async function browser_interact(args, signal = null) {
                 candidate: resolved.candidate,
                 success: true
             });
-            await cursorClickPulse(page);
+            await cursorClickPulse(page, pickBrowserCursorStyle('type'));
             const settled = await settleAfterInteraction(page, { interaction: 'type', popupClicks: 2, dropdownWaitMs: 260 });
             manager.lastHealthyUrl = page.url() || manager.lastHealthyUrl;
             const suffix = settled.note ? `; ${settled.note}` : '';
@@ -2205,7 +2256,7 @@ export async function browser_interact(args, signal = null) {
             const resolvedSelector = resolved.selector;
             await page.waitForSelector(resolvedSelector, { timeout: 8000 });
 
-            await cursorMoveToSelector(page, resolvedSelector, 220);
+            await cursorMoveToSelector(page, resolvedSelector, 220, pickBrowserCursorStyle('hover'));
 
             const hovered = await robustHover(page, resolvedSelector);
             if (!hovered.ok) {
@@ -2257,7 +2308,7 @@ export async function browser_interact(args, signal = null) {
         }
 
         if (action !== 'click') {
-            await cursorParkIdle(page, 'auto');
+            await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
         }
 
         return result;
@@ -2344,7 +2395,7 @@ export async function run_autonomous_web_agent(goal, signal = null) {
     
     try {
         const page = await manager.getPage();
-        await ensureVisualCursor(page);
+        await ensureVisualCursor(page, pickBrowserCursorStyle('default'));
 
         let stepCount = 0;
         let lastResult = 'Started browser.';
@@ -2529,7 +2580,7 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
                     const extracted = await extractBestPageText(page, normalizedGoal);
                     const ingredients = extractIngredientListFromText(extracted.text);
                     if (ingredients.length >= 4) {
-                        await cursorParkIdle(page, 'auto');
+                        await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
                         return `Goal achieved. Ingredients found:\n- ${ingredients.join('\n- ')}`;
                     }
 
@@ -2537,17 +2588,17 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
                     lastResult = 'Done requested, but concrete ingredient list not yet extracted. Performing extract_text pass first.';
                     continue;
                 }
-                await cursorParkIdle(page, 'auto');
+                await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
                 return `Goal achieved: ${command.reasoning || command.thought}`;
             } else if (command.action === 'back') {
                 await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
                 lastResult = `Navigated back from ${currentUrl}`;
-                await cursorParkIdle(page, 'auto');
+                await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
                 continue;
             } else if (command.action === 'refresh') {
                 await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
                 lastResult = `Reloaded ${currentUrl}`;
-                await cursorParkIdle(page, 'auto');
+                await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
                 continue;
             } else if (command.action === 'search') {
                 try {
@@ -2559,7 +2610,7 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
                     }
                     await page.waitForTimeout(1200);
                     lastResult = `Searched for: ${q}`;
-                    await cursorParkIdle(page, 'auto');
+                    await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
                 } catch (e) {
                     lastResult = `Failed search action: ${e.message}`;
                 }
@@ -2588,7 +2639,7 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
 
                 if (url === safeUrl) {
                     lastResult = `Already on ${url}. Skipping redundant navigation. Try searching or clicking an element.`;
-                    await cursorParkIdle(page, 'auto');
+                    await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
                 } else {
                     const nav = await resilientGoto(page, safeUrl, {
                         timeout: 30000,
@@ -2606,7 +2657,7 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
                     }
                     await page.waitForTimeout(600);
                     lastResult = `Navigated to ${safeUrl}`;
-                    await cursorParkIdle(page, 'auto');
+                    await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
                 }
             } else if (command.action === 'click') {
                 try {
@@ -2616,7 +2667,7 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
                         continue;
                     }
                     const selector = `[data-rex-id="${command.id}"]`;
-                    await cursorMoveToSelector(page, selector, 250);
+                    await cursorMoveToSelector(page, selector, 250, pickBrowserCursorStyle('click'));
                     
                     // Specific check for visibility/interactivity
                     const isVisible = await page.evaluate((sel) => {
@@ -2647,7 +2698,7 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
                         lastResult = `Failed click on ID ${command.id}: ${clicked.error}`;
                         continue;
                     }
-                    await cursorClickPulse(page);
+                    await cursorClickPulse(page, pickBrowserCursorStyle('click'));
 
                     const settled = await settleAfterInteraction(page, { interaction: 'autonomous_click', popupClicks: 2, dropdownWaitMs: 320 });
                     const suffix = settled.note ? `; ${settled.note}` : '';
@@ -2666,7 +2717,7 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
                     }
 
                     const selector = `[data-rex-id="${command.id}"]`;
-                    await cursorMoveToSelector(page, selector, 230);
+                    await cursorMoveToSelector(page, selector, 230, pickBrowserCursorStyle('type'));
                     const exists = await page.locator(selector).count();
                     if (!exists) {
                         lastResult = `Element ID ${command.id} is stale or not visible anymore. Re-evaluate the page.`;
@@ -2679,11 +2730,11 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
                         lastResult = `Failed type on ID ${command.id}: ${typed.error}`;
                         continue;
                     }
-                    await cursorClickPulse(page);
+                    await cursorClickPulse(page, pickBrowserCursorStyle('type'));
                     const settled = await settleAfterInteraction(page, { interaction: 'autonomous_type', popupClicks: 2, dropdownWaitMs: 260 });
                     const suffix = settled.note ? `; ${settled.note}` : '';
                     lastResult = `Typed into element ID ${command.id} (${typed.mode}${suffix})`;
-                    await cursorParkIdle(page, 'auto');
+                    await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
                 } catch(e) { lastResult = `Failed type on ID ${command.id}: ${e.message}`; }
             } else if (command.action === 'hover') {
                 try {
@@ -2693,7 +2744,7 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
                         continue;
                     }
                     const selector = `[data-rex-id="${command.id}"]`;
-                    await cursorMoveToSelector(page, selector, 220);
+                    await cursorMoveToSelector(page, selector, 220, pickBrowserCursorStyle('hover'));
                     const exists = await page.locator(selector).count();
                     if (!exists) {
                         lastResult = `Element ID ${command.id} is stale or not visible anymore. Re-evaluate the page.`;
@@ -2708,13 +2759,13 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
                     const settled = await settleAfterInteraction(page, { interaction: 'autonomous_hover', popupClicks: 1, dropdownWaitMs: 300 });
                     const suffix = settled.note ? `; ${settled.note}` : '';
                     lastResult = `Hovered over element ID ${command.id} (${hovered.mode}${suffix})`;
-                    await cursorParkIdle(page, 'auto');
+                    await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
                 } catch(e) { lastResult = `Failed hover on ID ${command.id}: ${e.message}`; }
             } else if (command.action === 'scroll') {
                 await page.evaluate(() => window.scrollBy(0, window.innerHeight * 0.6));
                 await page.waitForTimeout(1000);
                 lastResult = `Scrolled down`;
-                await cursorParkIdle(page, 'auto');
+                await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
             }
         }
 

@@ -760,6 +760,40 @@ async function handleSettings() {
         if (!p.isCancel(key)) config[propName] = key;
     }
 
+    const dualMode = await p.confirm({
+        message: `${g.arrow} Enable dual-model agent mode (planner + runner)?`,
+        initialValue: Boolean(config.multiModelAgentEnabled)
+    });
+    if (p.isCancel(dualMode)) return;
+    config.multiModelAgentEnabled = Boolean(dualMode);
+
+    if (config.multiModelAgentEnabled) {
+        config.agentRunnerProvider = 'openai';
+        config.agentRunnerModel = config.agentRunnerModel || 'gpt-5-mini';
+        config.agentPlannerOpenAIModel = config.agentPlannerOpenAIModel || 'gpt-4o-mini';
+        config.agentPlannerGeminiModel = config.agentPlannerGeminiModel || 'gemini-2.5-flash';
+
+        const plannerProvider = config.aiModel === 'gemini' ? 'gemini' : 'openai';
+        const plannerModel = plannerProvider === 'gemini'
+            ? config.agentPlannerGeminiModel
+            : config.agentPlannerOpenAIModel;
+
+        p.note(
+            `Planner: ${plannerProvider}/${plannerModel}\nRunner: openai/${config.agentRunnerModel}`,
+            'Dual-Model Routing'
+        );
+
+        if (!config.openaiKey) {
+            p.log.warn('OpenAI key missing: dual-model runner (gpt-5-mini) will not activate until key is set.');
+        }
+        if (plannerProvider === 'gemini' && !config.geminiKey) {
+            p.log.warn('Gemini key missing: planner will fall back to single-model behavior until key is set.');
+        }
+        if (plannerProvider === 'openai' && !config.openaiKey) {
+            p.log.warn('OpenAI key missing: planner will fall back to single-model behavior until key is set.');
+        }
+    }
+
     
     const webhookAction = await p.select({
         message: `${g.arrow} Platform connectors`,

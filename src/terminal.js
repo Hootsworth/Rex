@@ -155,6 +155,7 @@ Return EXACTLY THIS FORMAT if you need clarification:
 
         // Run action
         try {
+            // Intentional: AI terminal mode is policy-guarded but not strict-safe-mode-only.
             const policy = validateCommandPolicy(generatedCommand, { enforceSafeMode: false });
             if (!policy.safe) {
                 p.log.error(`Blocked by command policy: ${policy.reason}`);
@@ -195,6 +196,7 @@ export async function runWithHealing(cmdString) {
     let stdout = '';
     let stderr = '';
     try {
+        // Intentional: healing flow allows broader commands while still enforcing dangerous-pattern policy.
         const policy = validateCommandPolicy(cmdString, { enforceSafeMode: false });
         if (!policy.safe) {
             s.stop(pc.red('Command blocked by policy.'));

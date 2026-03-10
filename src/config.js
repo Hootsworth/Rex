@@ -14,6 +14,11 @@ const DEFAULT_CONFIG = {
   deepseekKey: '',
   ollamaModel: 'llama3:latest', // Default model
   selectedLocalModel: 'rex-fast', // Default local model ID
+  multiModelAgentEnabled: false,
+  agentRunnerProvider: 'openai',
+  agentRunnerModel: 'gpt-5-mini',
+  agentPlannerOpenAIModel: 'gpt-4o-mini',
+  agentPlannerGeminiModel: 'gemini-2.5-flash',
   agentPermission: 'safe', // 'safe' (ask config) or 'auto-pilot' (autonomous)
   slackWebhookUrl: '',
   discordWebhookUrl: '',

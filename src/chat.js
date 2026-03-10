@@ -1,8 +1,8 @@
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import gradient from 'gradient-string';
-import { runCompletion, getLocalLlama } from './ai.js';
-import { loadConfig } from './config.js';
+import { runCompletion, runCompletionWithTarget, getLocalLlama } from './ai.js';
+import { loadConfig, resolveModelAlias } from './config.js';
 
 // Import all actions to map
 import { aiCodeReview } from './ai.js';
@@ -182,7 +182,7 @@ const AVAILABLE_TOOLS = [
     { name: 'send_email', desc: 'Send an email via SMTP. Args: {"to": "...", "subject": "...", "body": "..."}', action: async (args) => { const { sendEmail } = await import('./email.js'); return await sendEmail(args.to, args.subject, args.body); } },
     { name: 'mouse_click', desc: 'Simulate a mouse click at specific coordinates (Windows). Args: {"x": 500, "y": 500}', action: async (args) => { const { mouseClick } = await import('./gui.js'); return await mouseClick(args.x, args.y); } },
     { name: 'type_text', desc: 'Simulate typing text into the active window (Windows). Args: {"text": "..."}', action: async (args) => { const { typeText } = await import('./gui.js'); return await typeText(args.text); } },
-    { name: 'os_agent', desc: 'Windows OS automation action for app/window/mouse/keyboard control. Args: {"type":"open|focus|move|click|type|hotkey|wait", ...}', action: async (args) => { const { executeOsAgentAction } = await import('./osAgent.js'); return await executeOsAgentAction(args); } }
+    { name: 'os_agent', desc: 'Windows OS automation action with built-in preflight checks. Args: {"type":"open|focus|move|click|type|hotkey|wait|preflight_analyse", ...}. For open use app="notepad.exe". For hotkey use combo="CTRL+S" (or keys:["control","s"]).', action: async (args) => { const { executeOsAgentAction } = await import('./osAgent.js'); return await executeOsAgentAction(args); } }
 ];
 
 const FUNNY_SPINNERS = [
@@ -325,8 +325,11 @@ export async function startAgentChat(options = {}) {
 
     // Per-session model override via --model flag
     if (options.model) {
-        const { resolveModelAlias } = await import('./config.js');
         config.aiModel = resolveModelAlias(options.model);
+    }
+
+    if (config.multiModelAgentEnabled && !config.openaiKey) {
+        p.note(pc.yellow('Dual-model mode requires an OpenAI key for the runner (gpt-5-mini). Falling back to single-model mode for this session.'), 'System');
     }
     let historyContext = [];
     const MAX_HISTORY = 30; // Increased from 6
@@ -393,7 +396,7 @@ export async function startAgentChat(options = {}) {
     }
 
     // Readonly mode: block write tools
-    const WRITE_TOOLS = ['write_file', 'patch_file', 'run_shell', 'browser_interact', 'run_python', 'os_agent', 'mouse_click', 'type_text'];
+    const WRITE_TOOLS = ['write_file', 'patch_file', 'run_shell', 'run_python', 'os_agent', 'mouse_click', 'type_text'];
     const OS_GATED_TOOLS = ['os_agent', 'mouse_click', 'type_text'];
 
     // Abort controller for interrupting AI/Tools
@@ -621,7 +624,10 @@ ${planModeRules}
 
             let responseText;
             try {
-                responseText = await getAgentResponse(messages, isLocal, abortController.signal);
+                responseText = await getAgentResponse(messages, isLocal, abortController.signal, {
+                    config,
+                    roleHint: isAgentIterating ? 'runner' : 'planner'
+                });
             } catch (err) {
                 s.stop();
                 if (err.name === 'AbortError' || err.message === 'Aborted') {
@@ -959,7 +965,45 @@ ${planModeRules}
 /**
  * Handoff: Uses Local LLM if configured, otherwise falls back to standard LLM via runCompletion
  */
-async function getAgentResponse(messages, isLocal, signal) {
+function resolveAgentTarget(config, roleHint = 'runner') {
+    if (!config?.multiModelAgentEnabled) return null;
+
+    if (roleHint === 'runner') {
+        return {
+            provider: String(config.agentRunnerProvider || 'openai').toLowerCase(),
+            model: config.agentRunnerModel || 'gpt-5-mini'
+        };
+    }
+
+    const selected = resolveModelAlias(config.aiModel || '');
+    if (selected === 'gemini') {
+        return {
+            provider: 'gemini',
+            model: config.agentPlannerGeminiModel || 'gemini-2.5-flash'
+        };
+    }
+
+    return {
+        provider: 'openai',
+        model: config.agentPlannerOpenAIModel || 'gpt-4o-mini'
+    };
+}
+
+function hasProviderKey(config, provider) {
+    if (provider === 'openai') return !!config?.openaiKey;
+    if (provider === 'gemini') return !!config?.geminiKey;
+    return false;
+}
+
+async function getAgentResponse(messages, isLocal, signal, runtime = {}) {
+    const cfg = runtime?.config || loadConfig();
+    const roleHint = runtime?.roleHint || 'runner';
+
+    const target = resolveAgentTarget(cfg, roleHint);
+    if (target && hasProviderKey(cfg, target.provider)) {
+        return await runCompletionWithTarget(messages, target, signal);
+    }
+
     if (isLocal) {
         try {
             const { getLocalLlama } = await import('./ai.js');
