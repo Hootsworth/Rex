@@ -38,6 +38,60 @@ function normalizeWebUrl(rawUrl) {
     return parsed.toString();
 }
 
+function canonicalizeUrlForLoopDetection(rawUrl) {
+    try {
+        const u = new URL(String(rawUrl || ''));
+        const host = u.hostname.toLowerCase();
+        const path = (u.pathname || '/').replace(/\/+$/, '') || '/';
+        return `${host}${path.toLowerCase()}`;
+    } catch {
+        return String(rawUrl || '').trim().toLowerCase();
+    }
+}
+
+function deriveIntentQueryFromUrl(rawUrl) {
+    try {
+        const u = new URL(String(rawUrl || ''));
+        const tokens = [];
+        const push = (v) => {
+            const s = String(v || '').trim().toLowerCase();
+            if (!s) return;
+            if (/^(www|in|com|org|net|co|home|index|search|s|ref|gp|dp|products?)$/.test(s)) return;
+            tokens.push(s);
+        };
+
+        (u.pathname || '')
+            .split('/')
+            .map((x) => decodeURIComponent(x || '').replace(/[-_+]+/g, ' ').trim())
+            .forEach(push);
+
+        for (const [k, v] of u.searchParams.entries()) {
+            if (!k || !v) continue;
+            if (/^(q|query|k|keyword|keywords|search|term)$/i.test(k)) {
+                push(decodeURIComponent(v).replace(/[-_+]+/g, ' ').trim());
+            }
+        }
+
+        const unique = [...new Set(tokens)].filter(Boolean);
+        return unique.join(' ').trim();
+    } catch {
+        return '';
+    }
+}
+
+function buildSiteScopedRecoveryQuery(rawUrl, fallback = '') {
+    let host = '';
+    try {
+        host = new URL(String(rawUrl || '')).hostname.replace(/^www\./i, '').trim();
+    } catch {
+        host = '';
+    }
+
+    const intent = deriveIntentQueryFromUrl(rawUrl) || String(fallback || '').trim();
+    if (host && intent) return `${intent} site:${host}`;
+    return intent || (host ? `site:${host}` : 'web search');
+}
+
 function buildSearchCandidates(query) {
     const q = String(query || '').trim();
     if (!q) throw new Error('Missing search query.');
@@ -604,14 +658,27 @@ import path from 'path';
 import fs from 'fs';
 import { execFile } from 'child_process';
 import util from 'util';
+import { loadConfig } from './config.js';
 
 const execFileAsync = util.promisify(execFile);
 
-function resolveNavigationExtensionPath() {
-    const fromEnv = process.env.REX_NAV_EXTENSION_PATH;
-    const defaultPath = path.join(process.cwd(), 'extensions', 'preflight-analyse-navigator');
-    const candidate = fromEnv && String(fromEnv).trim() ? String(fromEnv).trim() : defaultPath;
-    return fs.existsSync(candidate) ? candidate : '';
+function resolveNavigationExtensionPaths() {
+    const cfg = loadConfig();
+    const defaults = [path.join(process.cwd(), 'extensions', 'preflight-analyse-navigator')];
+    if (cfg.babysitPromptExtensionEnabled !== false) {
+        defaults.push(path.join(process.cwd(), 'extensions', 'babysit-task-prompter'));
+    }
+
+    const fromEnv = String(process.env.REX_NAV_EXTENSION_PATH || '').trim();
+    const envPaths = fromEnv
+        ? fromEnv
+            .split(/[;,]/)
+            .map((x) => String(x || '').trim())
+            .filter(Boolean)
+        : [];
+
+    const candidates = envPaths.length > 0 ? envPaths : defaults;
+    return [...new Set(candidates)].filter((p) => fs.existsSync(p));
 }
 
 function appendAutonomousBrowserDebug(entry) {
@@ -637,58 +704,142 @@ class BrowserManager {
         this.lastHealthyUrl = '';
         this.usingExtension = false;
         this.extensionPath = '';
+        this.extensionPaths = [];
+        this.navigationAttempts = [];
+        this.babysitHookedPages = new WeakSet();
+        this.babysitSession = {
+            active: false,
+            startedAt: '',
+            goal: '',
+            model: 'gpt-5-nano',
+            followCursor: true,
+            snapshots: 0,
+            notesSaved: 0,
+            feedback: {
+                useful: 0,
+                notUseful: 0,
+                replayAsked: 0
+            }
+        };
+        this.babysitAutoCapture = {
+            timer: null,
+            running: false,
+            intervalMs: 0,
+            lastError: ''
+        };
     }
 
-    async ensureBrowser() {
+    trackNavigationAttempt(targetUrl, source = 'navigate') {
+        const now = Date.now();
+        const canonicalTarget = canonicalizeUrlForLoopDetection(targetUrl);
+        this.navigationAttempts.push({
+            ts: now,
+            targetUrl: String(targetUrl || ''),
+            canonicalTarget,
+            source: String(source || 'navigate')
+        });
+
+        // Keep only a small rolling window to detect loops quickly.
+        this.navigationAttempts = this.navigationAttempts
+            .filter((x) => now - Number(x.ts || 0) <= 150000)
+            .slice(-25);
+    }
+
+    getNavigationLoopSignal(targetUrl) {
+        const canonicalTarget = canonicalizeUrlForLoopDetection(targetUrl);
+        if (!canonicalTarget) return { looping: false, repeats: 0 };
+
+        const recent = this.navigationAttempts.slice(-8);
+        const repeats = recent.filter((x) => x.canonicalTarget === canonicalTarget).length;
+        const tail = recent.slice(-3);
+        const tailAllSame = tail.length >= 3 && tail.every((x) => x.canonicalTarget === canonicalTarget);
+        return {
+            looping: repeats >= 3 || tailAllSame,
+            repeats
+        };
+    }
+
+    async ensureBrowser(opts = {}) {
+        let justLaunched = false;
+        const isHeadless = !!opts.headless;
         if (this.browser && !this.browser.isConnected()) {
             this.browser = null;
             this.context = null;
             this.pages = [];
             this.currentPageIndex = 0;
             this.lastHealthyUrl = '';
+            this.navigationAttempts = [];
+            this.babysitSession = {
+                active: false,
+                startedAt: '',
+                goal: '',
+                model: 'gpt-5-nano',
+                followCursor: true,
+                snapshots: 0,
+                notesSaved: 0,
+                feedback: {
+                    useful: 0,
+                    notUseful: 0,
+                    replayAsked: 0
+                }
+            };
+            if (this.babysitAutoCapture?.timer) {
+                clearInterval(this.babysitAutoCapture.timer);
+            }
+            this.babysitAutoCapture = {
+                timer: null,
+                running: false,
+                intervalMs: 0,
+                lastError: ''
+            };
         }
 
         if (!this.browser) {
+            justLaunched = true;
             const { chromium } = await import('playwright');
-            const extensionPath = resolveNavigationExtensionPath();
+            const extensionPaths = resolveNavigationExtensionPaths();
 
-            if (extensionPath) {
+            if (extensionPaths.length > 0) {
                 const profilePath = path.join(process.cwd(), '.agent', 'playwright-profile');
                 if (!fs.existsSync(profilePath)) fs.mkdirSync(profilePath, { recursive: true });
 
+                const joinedPaths = extensionPaths.join(',');
+
                 try {
                     this.context = await chromium.launchPersistentContext(profilePath, {
-                        headless: false,
+                        headless: isHeadless,
                         args: [
-                            `--disable-extensions-except=${extensionPath}`,
-                            `--load-extension=${extensionPath}`
+                            `--disable-extensions-except=${joinedPaths}`,
+                            `--load-extension=${joinedPaths}`
                         ]
                     });
                     this.browser = this.context.browser();
                     this.usingExtension = true;
-                    this.extensionPath = extensionPath;
+                    this.extensionPaths = extensionPaths;
+                    this.extensionPath = joinedPaths;
                 } catch (extErr) {
                     appendAutonomousBrowserDebug({
                         source: 'ensureBrowser',
                         phase: 'extension_launch_failed_fallback',
-                        extensionPath,
+                        extensionPath: joinedPaths,
                         error: extErr?.message || String(extErr)
                     });
 
-                    this.browser = await chromium.launch({ headless: false });
+                    this.browser = await chromium.launch({ headless: isHeadless });
                     this.context = await this.browser.newContext();
                     this.usingExtension = false;
                     this.extensionPath = '';
+                    this.extensionPaths = [];
                 }
             } else {
-                this.browser = await chromium.launch({ headless: false });
+                this.browser = await chromium.launch({ headless: isHeadless });
                 this.context = await this.browser.newContext();
                 this.usingExtension = false;
                 this.extensionPath = '';
+                this.extensionPaths = [];
             }
 
-            const page = await this.context.newPage();
-            this.pages.push(page);
+            // Do not eagerly open a new tab here; we normalize tabs after context load.
         }
 
         if (!this.context) {
@@ -696,7 +847,29 @@ class BrowserManager {
         }
 
         // Rebuild page list from context in case tabs were opened/closed outside manager bookkeeping.
-        this.pages = this.context.pages().filter((p) => !p.isClosed());
+        this.pages = this.context.pages().filter((p) => {
+            if (!p || p.isClosed()) return false;
+            const u = String(p.url() || '');
+            if (u.startsWith('chrome-extension://') || u.startsWith('devtools://')) return false;
+            return true;
+        });
+
+        if (justLaunched && this.pages.length > 1) {
+            const nonBlank = this.pages.filter((p) => !isBlankUrl(p.url() || ''));
+            if (nonBlank.length > 0) {
+                const blankTabs = this.pages.filter((p) => isBlankUrl(p.url() || ''));
+                for (const t of blankTabs) {
+                    await t.close().catch(() => {});
+                }
+                this.pages = nonBlank.filter((p) => !p.isClosed());
+            } else {
+                const keep = this.pages[0];
+                for (let i = 1; i < this.pages.length; i++) {
+                    await this.pages[i].close().catch(() => {});
+                }
+                this.pages = keep && !keep.isClosed() ? [keep] : [];
+            }
+        }
 
         this.pages = this.pages.filter((p) => !p.isClosed());
         if (this.pages.length === 0 && this.context) {
@@ -708,11 +881,24 @@ class BrowserManager {
             this.currentPageIndex = Math.max(0, this.pages.length - 1);
         }
 
+        for (const p of this.pages) {
+            if (this.babysitHookedPages.has(p)) continue;
+            const rearm = async () => {
+                if (!this.babysitSession?.active || !this.babysitSession?.followCursor) return;
+                await ensureVisualCursor(p, pickBrowserCursorStyle('default'));
+                await setBabysitCursorFollow(p, true);
+            };
+
+            p.on('framenavigated', () => { rearm().catch(() => {}); });
+            p.on('domcontentloaded', () => { rearm().catch(() => {}); });
+            this.babysitHookedPages.add(p);
+        }
+
         return this.browser;
     }
 
-    async getPage() {
-        await this.ensureBrowser();
+    async getPage(opts = {}) {
+        await this.ensureBrowser(opts);
         let page = this.pages[this.currentPageIndex];
         if (!page || page.isClosed()) {
             page = await this.context.newPage();
@@ -738,6 +924,31 @@ class BrowserManager {
             this.lastHealthyUrl = '';
             this.usingExtension = false;
             this.extensionPath = '';
+            this.extensionPaths = [];
+            this.navigationAttempts = [];
+            this.babysitSession = {
+                active: false,
+                startedAt: '',
+                goal: '',
+                model: 'gpt-5-nano',
+                followCursor: true,
+                snapshots: 0,
+                notesSaved: 0,
+                feedback: {
+                    useful: 0,
+                    notUseful: 0,
+                    replayAsked: 0
+                }
+            };
+            if (this.babysitAutoCapture?.timer) {
+                clearInterval(this.babysitAutoCapture.timer);
+            }
+            this.babysitAutoCapture = {
+                timer: null,
+                running: false,
+                intervalMs: 0,
+                lastError: ''
+            };
         }
     }
 
@@ -793,7 +1004,7 @@ class BrowserManager {
     }
 }
 
-const manager = new BrowserManager();
+export const manager = new BrowserManager();
 
 const PREFLGIHT_ANALYSE_PLOT_NAME = 'Preflgiht Analyse Plot';
 const PREFLIGHT_ANALYSE_PLOT_LIMIT = 1200;
@@ -1036,6 +1247,11 @@ async function buildInteractiveSnapshot(page) {
                 formIntent: extMeta?.formIntent && typeof extMeta.formIntent === 'object'
                     ? extMeta.formIntent
                     : { primary: '', tags: [] },
+                confidence: Number(extMeta?.confidence || 0),
+                actionTags: Array.isArray(extMeta?.actionTags) ? extMeta.actionTags : [],
+                stability: extMeta?.stability && typeof extMeta.stability === 'object'
+                    ? extMeta.stability
+                    : { sightings: 0, consecutiveSeen: 0, stabilityScore: 0 },
                 obstruction: extMeta?.obstruction && typeof extMeta.obstruction === 'object'
                     ? extMeta.obstruction
                     : { blocked: false },
@@ -1096,6 +1312,9 @@ function scoreTargetCandidate(candidate, args) {
     const cIntentTags = Array.isArray(candidate.formIntent?.tags)
         ? candidate.formIntent.tags.map((t) => normalizeForMatch(t)).filter(Boolean)
         : [];
+    const cActionTags = Array.isArray(candidate.actionTags)
+        ? candidate.actionTags.map((t) => normalizeForMatch(t)).filter(Boolean)
+        : [];
     const intentNeedles = inferFormIntentNeedles(args);
 
     let score = 0;
@@ -1141,6 +1360,18 @@ function scoreTargetCandidate(candidate, args) {
             if (cIntentPrimary === need) score += 36;
             else if (cIntentTags.includes(need)) score += 28;
         }
+    }
+
+    if (candidate.confidence > 0) {
+        score += Math.min(30, Math.floor(Number(candidate.confidence || 0) * 0.34));
+    }
+
+    if (candidate.stability?.stabilityScore > 0) {
+        score += Math.min(20, Math.floor(Number(candidate.stability.stabilityScore || 0) * 0.2));
+    }
+
+    if (action && cActionTags.includes(action)) {
+        score += 22;
     }
 
     if (candidate.obstruction?.blocked) {
@@ -1508,6 +1739,441 @@ async function cursorParkIdle(page, side = 'auto', style = 'default') {
             await window.__rex_visual_cursor.park(side);
         }
     }, { side, style }).catch(() => {});
+}
+
+function getBabysitNotesPath() {
+    return path.join(process.cwd(), '.rex', 'babysit-notes.json');
+}
+
+function ensureBabysitNotesDir() {
+    const dir = path.dirname(getBabysitNotesPath());
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function loadBabysitNotesStore() {
+    const filePath = getBabysitNotesPath();
+    try {
+        if (fs.existsSync(filePath)) {
+            const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            if (parsed && typeof parsed === 'object' && parsed.entries) return parsed;
+        }
+    } catch {
+        // Corrupt note file should not crash runtime.
+    }
+
+    return {
+        feature: 'Babysit Notes',
+        schemaVersion: 1,
+        updatedAt: new Date().toISOString(),
+        entries: []
+    };
+}
+
+function saveBabysitNotesStore(store) {
+    try {
+        ensureBabysitNotesDir();
+        const normalized = {
+            feature: 'Babysit Notes',
+            schemaVersion: 1,
+            updatedAt: new Date().toISOString(),
+            entries: Array.isArray(store?.entries) ? store.entries.slice(-3000) : []
+        };
+        fs.writeFileSync(getBabysitNotesPath(), JSON.stringify(normalized, null, 2), 'utf8');
+    } catch {
+        // Persistence failure is non-fatal.
+    }
+}
+
+function hostFromUrl(url = '') {
+    try {
+        return new URL(String(url || '')).hostname.replace(/^www\./i, '').toLowerCase();
+    } catch {
+        return '';
+    }
+}
+
+async function setBabysitCursorFollow(page, enabled = true) {
+    await ensureVisualCursor(page, pickBrowserCursorStyle('default'));
+    await page.evaluate(({ enabled }) => {
+        const key = '__rexBabysitCursorSync';
+        const win = window;
+
+        if (!enabled) {
+            const prev = win[key];
+            if (prev && prev.handler) {
+                window.removeEventListener('mousemove', prev.handler, true);
+                window.removeEventListener('pointermove', prev.handler, true);
+                window.removeEventListener('rex-babysit-replay-move', prev.replayHandler, true);
+                window.removeEventListener('rex-babysit-feedback', prev.feedbackHandler, true);
+            }
+            delete win[key];
+            return;
+        }
+
+        if (win[key]?.enabled) return;
+
+        const throttled = { busy: false };
+        if (!Array.isArray(window.__rexBabysitMoves)) {
+            window.__rexBabysitMoves = [];
+        }
+        if (!Array.isArray(window.__rexBabysitFeedback)) {
+            window.__rexBabysitFeedback = [];
+        }
+
+        const handler = (event) => {
+            const cursor = window.__rex_visual_cursor;
+            if (!cursor || throttled.busy) return;
+            const now = Date.now();
+            const prev = window.__rexBabysitMoves.length > 0
+                ? window.__rexBabysitMoves[window.__rexBabysitMoves.length - 1]
+                : null;
+
+            if (!prev || Math.hypot((event.clientX - prev.x), (event.clientY - prev.y)) >= 12 || (now - prev.t) >= 450) {
+                window.__rexBabysitMoves.push({ x: event.clientX, y: event.clientY, t: now });
+                if (window.__rexBabysitMoves.length > 350) {
+                    window.__rexBabysitMoves = window.__rexBabysitMoves.slice(-350);
+                }
+            }
+
+            throttled.busy = true;
+            cursor.setStyle('default');
+            cursor.moveTo(event.clientX, event.clientY, 36).finally(() => {
+                window.setTimeout(() => { throttled.busy = false; }, 18);
+            });
+        };
+
+        const replayHandler = async () => {
+            const cursor = window.__rex_visual_cursor;
+            const moves = Array.isArray(window.__rexBabysitMoves) ? window.__rexBabysitMoves : [];
+            if (!cursor || moves.length < 2) return;
+
+            let i = moves.length - 1;
+            let from = moves[i - 1];
+            let to = moves[i];
+            while (i > 1 && Math.hypot((to.x - from.x), (to.y - from.y)) < 22) {
+                i -= 1;
+                from = moves[i - 1];
+                to = moves[i];
+            }
+
+            cursor.setStyle('handopen');
+            await cursor.moveTo(from.x, from.y, 130);
+            await cursor.moveTo(to.x, to.y, 340);
+            cursor.clickPulse();
+        };
+
+        const feedbackHandler = (event) => {
+            const detail = event?.detail || {};
+            window.__rexBabysitFeedback.push({
+                at: new Date().toISOString(),
+                taskId: String(detail.taskId || ''),
+                verdict: String(detail.verdict || ''),
+                note: String(detail.note || '').slice(0, 240)
+            });
+            if (window.__rexBabysitFeedback.length > 240) {
+                window.__rexBabysitFeedback = window.__rexBabysitFeedback.slice(-240);
+            }
+        };
+
+        window.addEventListener('mousemove', handler, true);
+        window.addEventListener('pointermove', handler, true);
+        window.addEventListener('rex-babysit-replay-move', replayHandler, true);
+        window.addEventListener('rex-babysit-feedback', feedbackHandler, true);
+        win[key] = { enabled: true, handler, replayHandler, feedbackHandler };
+    }, { enabled: !!enabled }).catch(() => {});
+}
+
+async function triggerBabysitPromptInPage(page, payload = {}) {
+    return await page.evaluate((detail) => {
+        const rootId = 'rex-babysit-fallback-root';
+        const styleId = 'rex-babysit-fallback-style';
+
+        const ensureFallbackStyle = () => {
+            if (document.getElementById(styleId)) return;
+            const style = document.createElement('style');
+            style.id = styleId;
+            style.textContent = `
+                #${rootId} {
+                    position: fixed;
+                    right: 18px;
+                    top: 16px;
+                    width: min(340px, 90vw);
+                    z-index: 2147483647;
+                    font-family: "Segoe UI", Tahoma, sans-serif;
+                }
+                #${rootId} .rex-card {
+                    background: rgba(255, 255, 255, 0.94);
+                    border: 1px solid rgba(17, 24, 39, 0.08);
+                    border-radius: 12px;
+                    box-shadow: 0 12px 28px rgba(2, 6, 23, 0.12);
+                    backdrop-filter: blur(8px);
+                    padding: 10px 10px 9px 10px;
+                    color: #0f172a;
+                }
+                #${rootId} .rex-title { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #64748b; margin: 0 0 6px 0; }
+                #${rootId} .rex-task { font-size: 14px; font-weight: 600; margin: 0 0 4px 0; }
+                #${rootId} .rex-note { font-size: 12px; color: #475569; margin: 0 0 8px 0; }
+                #${rootId} .rex-actions { display: flex; gap: 8px; }
+                #${rootId} button { border: 1px solid rgba(15,23,42,.12); border-radius: 999px; padding: 6px 10px; font-size: 11px; font-weight: 600; cursor: pointer; background: #f8fafc; color: #0f172a; }
+                #${rootId} .rex-which { background: #0f172a; color: #f8fafc; border-color: #0f172a; }
+                #${rootId} .rex-yes { background: #ecfeff; color: #155e75; border-color: #67e8f9; }
+                #${rootId} .rex-no { background: #fff1f2; color: #9f1239; border-color: #fecdd3; }
+                #${rootId} .rex-swoosh { display: inline-block; opacity: 0; transform: translateX(16px) skewX(-8deg); filter: blur(1px); animation: rexSwoosh .42s cubic-bezier(.19,.84,.31,1) forwards; }
+                #${rootId} .rex-note.rex-swoosh { animation-delay: .06s; }
+                @keyframes rexSwoosh {
+                    from { opacity: 0; transform: translateX(16px) skewX(-8deg); filter: blur(1px); }
+                    to { opacity: 1; transform: translateX(0) skewX(0); filter: blur(0); }
+                }
+            `;
+            document.documentElement.appendChild(style);
+        };
+
+        const removeFallback = () => {
+            const existing = document.getElementById(rootId);
+            if (existing) existing.remove();
+        };
+
+        const showFallback = () => {
+            ensureFallbackStyle();
+            removeFallback();
+
+            const taskId = String(detail?.taskId || `task-${Date.now()}`);
+            const task = String(detail?.task || 'hmm... please complete this step.');
+            const note = String(detail?.note || 'wait, was that move necessary?');
+
+            const root = document.createElement('div');
+            root.id = rootId;
+            root.innerHTML = `
+                <div class="rex-card">
+                    <div class="rex-title">Rex Babysit Request</div>
+                    <div class="rex-task rex-swoosh"></div>
+                    <div class="rex-note rex-swoosh"></div>
+                    <div class="rex-actions">
+                        <button class="rex-which">which move?</button>
+                        <button class="rex-yes">yes</button>
+                        <button class="rex-no">no</button>
+                    </div>
+                </div>
+            `;
+
+            root.querySelector('.rex-task').textContent = task;
+            root.querySelector('.rex-note').textContent = note;
+
+            root.querySelector('.rex-which')?.addEventListener('click', () => {
+                window.dispatchEvent(new CustomEvent('rex-babysit-replay-move', { detail: { taskId } }));
+            });
+
+            root.querySelector('.rex-yes')?.addEventListener('click', () => {
+                window.dispatchEvent(new CustomEvent('rex-babysit-feedback', {
+                    detail: { taskId, verdict: 'yes', note: 'Marked as useful/important move' }
+                }));
+                removeFallback();
+            });
+
+            root.querySelector('.rex-no')?.addEventListener('click', () => {
+                window.dispatchEvent(new CustomEvent('rex-babysit-feedback', {
+                    detail: { taskId, verdict: 'no', note: 'Marked as not useful' }
+                }));
+                removeFallback();
+            });
+
+            document.documentElement.appendChild(root);
+        };
+
+        window.dispatchEvent(new CustomEvent('rex-babysit-prompt', { detail }));
+
+        // Fallback in case extension listener is unavailable in this tab/context.
+        window.setTimeout(() => {
+            const extRoot = document.getElementById('rex-babysit-prompt-root');
+            const fallbackRoot = document.getElementById(rootId);
+            if (!extRoot && !fallbackRoot) {
+                showFallback();
+            }
+        }, 140);
+
+        return true;
+    }, payload).catch(() => false);
+}
+
+function stopBabysitAutoCapture() {
+    if (manager.babysitAutoCapture?.timer) {
+        clearInterval(manager.babysitAutoCapture.timer);
+    }
+    manager.babysitAutoCapture = {
+        timer: null,
+        running: false,
+        intervalMs: 0,
+        lastError: ''
+    };
+}
+
+function startBabysitAutoCapture(options = {}) {
+    stopBabysitAutoCapture();
+    const intervalMs = Math.max(10000, Number(options.intervalMs || 18000));
+    const model = String(options.model || manager.babysitSession.model || 'gpt-5-nano');
+
+    manager.babysitAutoCapture.intervalMs = intervalMs;
+    manager.babysitAutoCapture.timer = setInterval(async () => {
+        if (!manager.babysitSession?.active || manager.babysitAutoCapture.running) return;
+        manager.babysitAutoCapture.running = true;
+        try {
+            const page = await manager.getPage();
+            const snapshot = await collectBabysitSnapshot(page, {
+                task: manager.babysitSession.goal || '',
+                note: 'auto-capture'
+            });
+            const summary = await summarizeBabysitSnapshot(snapshot, {
+                askModel: true,
+                model
+            });
+            persistBabysitNote(snapshot, summary);
+            manager.babysitSession.snapshots = Number(manager.babysitSession.snapshots || 0) + 1;
+            manager.babysitSession.notesSaved = Number(manager.babysitSession.notesSaved || 0) + 1;
+
+            const feedbackRecent = Array.isArray(snapshot?.moveLearning?.feedbackRecent)
+                ? snapshot.moveLearning.feedbackRecent
+                : [];
+            const yesCount = feedbackRecent.filter((x) => String(x?.verdict || '').toLowerCase() === 'yes').length;
+            const noCount = feedbackRecent.filter((x) => String(x?.verdict || '').toLowerCase() === 'no').length;
+            manager.babysitSession.feedback.useful = yesCount;
+            manager.babysitSession.feedback.notUseful = noCount;
+
+            if (snapshot?.moveLearning?.movesCount >= 8 && feedbackRecent.length === 0 && (manager.babysitSession.snapshots % 2 === 1)) {
+                await triggerBabysitPromptInPage(page, {
+                    taskId: `babysit-auto-${Date.now()}`,
+                    task: 'hmm... wait, was that move necessary?',
+                    note: 'click which move to replay and label yes/no.'
+                });
+            }
+        } catch (err) {
+            manager.babysitAutoCapture.lastError = String(err?.message || err);
+        } finally {
+            manager.babysitAutoCapture.running = false;
+        }
+    }, intervalMs);
+}
+
+async function collectBabysitSnapshot(page, args = {}) {
+    const url = page.url() || '';
+    const title = await page.title().catch(() => 'Unknown');
+    const snapshot = await buildInteractiveSnapshot(page).catch(() => []);
+
+    const sample = snapshot.slice(0, 60).map((x) => ({
+        id: x.id || '',
+        tag: x.tag || '',
+        role: x.role || '',
+        text: String(x.text || '').slice(0, 140),
+        placeholder: String(x.placeholder || '').slice(0, 90),
+        href: String(x.href || '').slice(0, 220),
+        inViewport: !!x.inViewport
+    }));
+
+    const moveAndFeedback = await page.evaluate(() => {
+        const moves = Array.isArray(window.__rexBabysitMoves) ? window.__rexBabysitMoves : [];
+        const feedback = Array.isArray(window.__rexBabysitFeedback) ? window.__rexBabysitFeedback : [];
+        return {
+            movesCount: moves.length,
+            recentMoves: moves.slice(-20),
+            feedbackCount: feedback.length,
+            feedbackRecent: feedback.slice(-16)
+        };
+    }).catch(() => ({ movesCount: 0, recentMoves: [], feedbackCount: 0, feedbackRecent: [] }));
+
+    return {
+        at: new Date().toISOString(),
+        url,
+        title,
+        host: hostFromUrl(url),
+        task: String(args.task || args.goal || args.query || manager.babysitSession.goal || '').trim(),
+        userNote: String(args.note || '').trim(),
+        interactiveCount: snapshot.length,
+        sample,
+        moveLearning: moveAndFeedback
+    };
+}
+
+async function summarizeBabysitSnapshot(snapshot, args = {}) {
+    const askModel = args.askModel !== false;
+    const model = String(args.model || manager.babysitSession.model || 'gpt-5-nano').trim() || 'gpt-5-nano';
+    if (!askModel) {
+        return {
+            model,
+            notes: [
+                `Site host: ${snapshot.host || 'unknown'}`,
+                `Top interactive elements observed: ${snapshot.interactiveCount}`,
+                'Use this snapshot for selector confidence and repeat-task handling.'
+            ],
+            modelUsed: false
+        };
+    }
+
+    try {
+        const { runCompletionWithTarget } = await import('./ai.js');
+        const prompt = [
+            'You are assisting a browser babysit mode.',
+            'Generate compact autonomous navigation notes from this snapshot.',
+            'Return strict JSON with this shape:',
+            '{"general":["..."],"siteSpecific":["..."],"taskSpecific":["..."]}',
+            'Keep each bullet under 140 chars, max 5 items per section.',
+            `Task: ${snapshot.task || 'unspecified'}`,
+            `Host: ${snapshot.host}`,
+            `Title: ${snapshot.title}`,
+            `URL: ${snapshot.url}`,
+            `Interactive sample: ${JSON.stringify(snapshot.sample.slice(0, 24))}`
+        ].join('\n');
+
+        const raw = await runCompletionWithTarget(
+            [{ role: 'user', content: prompt }],
+            { provider: 'openai', model },
+            null
+        );
+
+        const parsed = parseFirstJsonObject(raw) || {};
+        const general = Array.isArray(parsed.general) ? parsed.general.map((x) => String(x || '').trim()).filter(Boolean) : [];
+        const siteSpecific = Array.isArray(parsed.siteSpecific) ? parsed.siteSpecific.map((x) => String(x || '').trim()).filter(Boolean) : [];
+        const taskSpecific = Array.isArray(parsed.taskSpecific) ? parsed.taskSpecific.map((x) => String(x || '').trim()).filter(Boolean) : [];
+
+        const fallback = [
+            `Primary host path: ${snapshot.host || 'unknown'}`,
+            `Prefer visible IDs first; avoid stale selectors on ${snapshot.title}`
+        ];
+
+        return {
+            model,
+            notes: [...general, ...siteSpecific, ...taskSpecific, ...fallback].filter(Boolean).slice(0, 16),
+            modelUsed: true,
+            raw: String(raw || '').slice(0, 1200)
+        };
+    } catch (err) {
+        return {
+            model,
+            notes: [
+                `Model summary unavailable: ${String(err?.message || err)}`,
+                `Fallback note: keep interaction around top visible controls on ${snapshot.host || 'site'}.`
+            ],
+            modelUsed: false
+        };
+    }
+}
+
+function persistBabysitNote(snapshot, summary) {
+    const store = loadBabysitNotesStore();
+    const host = snapshot.host || hostFromUrl(snapshot.url || '');
+    const entry = {
+        at: snapshot.at || new Date().toISOString(),
+        host,
+        url: snapshot.url || '',
+        title: snapshot.title || '',
+        task: snapshot.task || '',
+        model: summary.model || 'gpt-5-nano',
+        modelUsed: !!summary.modelUsed,
+        notes: Array.isArray(summary.notes) ? summary.notes.slice(0, 24) : [],
+        sample: Array.isArray(snapshot.sample) ? snapshot.sample.slice(0, 24) : []
+    };
+
+    store.entries.push(entry);
+    saveBabysitNotesStore(store);
+    return entry;
 }
 
 function normalizeExtractedText(text) {
@@ -1907,7 +2573,117 @@ async function collectBrowserHealth(page) {
     };
 }
 
-function preflightRecommendation(health, targetAction, readiness) {
+async function collectPreflightExtensionIntel(page) {
+    return await page.evaluate(() => {
+        const intel = window.__rexPreflightIntelV2 && typeof window.__rexPreflightIntelV2 === 'object'
+            ? window.__rexPreflightIntelV2
+            : null;
+        const snapshot = window.__rexPreflightSnapshot && typeof window.__rexPreflightSnapshot === 'object'
+            ? window.__rexPreflightSnapshot
+            : null;
+
+        if (!intel && !snapshot) {
+            return {
+                available: false,
+                version: '',
+                riskLevel: 'unknown',
+                blockedRatio: 0,
+                volatility: 0,
+                topCandidates: []
+            };
+        }
+
+        const fallbackTotal = Number(snapshot?.total || 0);
+        const fallbackBlocked = Number(snapshot?.blocked || 0);
+        const fallbackRatio = fallbackTotal > 0 ? fallbackBlocked / fallbackTotal : 0;
+
+        return {
+            available: true,
+            version: String(intel?.version || snapshot?.version || window.__rexPreflightVersion || ''),
+            generatedAt: String(intel?.generatedAt || snapshot?.at || ''),
+            riskLevel: String(intel?.riskProfile?.level || 'unknown'),
+            blockedRatio: Number(intel?.riskProfile?.blockedRatio ?? fallbackRatio ?? 0),
+            volatility: Number(intel?.riskProfile?.volatility ?? 0),
+            blockedInteractables: Number(intel?.riskProfile?.blockedInteractables ?? fallbackBlocked ?? 0),
+            totalInteractables: Number(intel?.riskProfile?.totalInteractables ?? fallbackTotal ?? 0),
+            topCandidates: Array.isArray(intel?.topCandidates) ? intel.topCandidates.slice(0, 10) : [],
+            lanes: intel?.actionLanes && typeof intel.actionLanes === 'object' ? intel.actionLanes : null,
+            delta: intel?.delta && typeof intel.delta === 'object' ? intel.delta : null
+        };
+    }).catch(() => ({
+        available: false,
+        version: '',
+        riskLevel: 'unknown',
+        blockedRatio: 0,
+        volatility: 0,
+        topCandidates: []
+    }));
+}
+
+function preflightRecommendation(health, targetAction, readiness, extensionIntel = null) {
+    const actions = [];
+    let riskScore = 14;
+
+    if (!readiness.ok) {
+        riskScore += 42;
+        actions.push('run auto-heal and reconfirm actionable state');
+    }
+
+    if (health.isBlank) {
+        riskScore += 50;
+        actions.push('recover from about:blank using last healthy URL or resilient search');
+    }
+
+    const risky = new Set(['click', 'type', 'hover', 'evaluate']);
+    if (risky.has(targetAction) && health.interactiveCount === 0) {
+        riskScore += 28;
+        actions.push('run analyze_page before risky interaction');
+    }
+
+    if (extensionIntel?.available) {
+        if (Number(extensionIntel.blockedRatio || 0) >= 0.25) {
+            riskScore += 26;
+            actions.push('handle overlays/popups before continuing');
+        }
+        if (Number(extensionIntel.volatility || 0) >= 0.55) {
+            riskScore += 18;
+            actions.push('wait briefly for DOM to stabilize before interacting');
+        }
+        if (Array.isArray(extensionIntel.topCandidates) && extensionIntel.topCandidates.length === 0 && risky.has(targetAction)) {
+            riskScore += 10;
+            actions.push('re-scan action lanes to avoid stale selectors');
+        }
+    }
+
+    if (!actions.length) {
+        actions.push('continue with selected action');
+    }
+
+    let level = 'low';
+    let next = targetAction || 'continue';
+    let reason = 'Browser context appears healthy.';
+
+    if (riskScore >= 75) {
+        level = 'high';
+        next = 'search';
+        reason = readiness.error || 'High-risk browser state detected.';
+    } else if (riskScore >= 42) {
+        level = 'medium';
+        next = targetAction || 'refresh';
+        reason = readiness.error || 'Moderate risk detected; pre-action hardening recommended.';
+    }
+
+    return {
+        version: '2.0.0',
+        score: Math.max(0, Math.min(100, Math.round(riskScore))),
+        level,
+        next,
+        reason,
+        actions
+    };
+}
+
+function preflightRecommendationLegacy(health, targetAction, readiness) {
     if (!readiness.ok) {
         return {
             level: 'high',
@@ -1962,7 +2738,9 @@ export async function browser_interact(args, signal = null) {
     }
 
     try {
-        const page = await manager.getPage();
+        const cfg = loadConfig();
+        const runHeadless = args.mode === 'headless' || !!cfg.webAgentHeadless;
+        const page = await manager.getPage({ headless: runHeadless });
         await ensureVisualCursor(page, pickBrowserCursorStyle('default'));
         let result = '';
         let { action, url, selector, text, code, tabIndex, id } = args;
@@ -2013,6 +2791,163 @@ export async function browser_interact(args, signal = null) {
         }
         if (action === 'list' || action === 'list_tabs') return await manager.listTabs();
         if (action === 'close' || action === 'close_browser') { await manager.close(); return 'Browser closed.'; }
+        if (action === 'babysit_start') {
+            const forceEnable = args.forceEnable === true || args.force === true;
+            if (cfg.babysitModeEnabled === false && !forceEnable) {
+                return 'Error: Babysit mode is disabled in config. Enable it from rexai open -> Tuning Bay.';
+            }
+            const configuredModel = String(cfg.babysitNotesModel || 'gpt-5-nano').trim() || 'gpt-5-nano';
+            const followCursor = args.followCursor !== undefined
+                ? args.followCursor !== false
+                : cfg.babysitFollowCursor !== false;
+            manager.babysitSession = {
+                active: true,
+                startedAt: new Date().toISOString(),
+                goal: String(args.goal || args.task || '').trim(),
+                model: String(args.model || configuredModel).trim() || configuredModel,
+                followCursor,
+                snapshots: 0,
+                notesSaved: 0,
+                feedback: {
+                    useful: 0,
+                    notUseful: 0,
+                    replayAsked: 0
+                }
+            };
+
+            if (followCursor) {
+                for (const p of manager.pages.filter((x) => x && !x.isClosed())) {
+                    await setBabysitCursorFollow(p, true);
+                }
+            }
+            await ensureVisualCursor(page, pickBrowserCursorStyle('default'));
+
+            // Hard startup probe: always persist one deterministic hello marker per babysit start.
+            const helloUrl = page.url() || '';
+            const helloTitle = await page.title().catch(() => 'Unknown');
+            persistBabysitNote({
+                at: new Date().toISOString(),
+                url: helloUrl,
+                title: helloTitle,
+                host: hostFromUrl(helloUrl),
+                task: manager.babysitSession.goal || 'babysit-start',
+                userNote: 'startup-handshake',
+                interactiveCount: 0,
+                sample: [],
+                moveLearning: { movesCount: 0, recentMoves: [], feedbackCount: 0, feedbackRecent: [] }
+            }, {
+                model: manager.babysitSession.model,
+                modelUsed: false,
+                notes: ['hello!']
+            });
+            manager.babysitSession.notesSaved = Number(manager.babysitSession.notesSaved || 0) + 1;
+
+            startBabysitAutoCapture({
+                intervalMs: Number(args.intervalMs || cfg.babysitAutoSnapshotMs || 18000),
+                model: manager.babysitSession.model
+            });
+            await triggerBabysitPromptInPage(page, {
+                taskId: 'babysit-intro',
+                task: 'hello!',
+                note: 'wait, was that move necessary? mark it with yes/no, or ask which move to replay.'
+            });
+            return `Babysit mode enabled. followCursor=${followCursor}. model=${manager.babysitSession.model}.`;
+        }
+        if (action === 'babysit_status') {
+            const active = !!manager.babysitSession?.active;
+            const state = {
+                active,
+                ...manager.babysitSession,
+                url: page.url() || '',
+                title: await page.title().catch(() => 'Unknown'),
+                notesPath: getBabysitNotesPath(),
+                autoCapture: {
+                    enabled: !!manager.babysitAutoCapture?.timer,
+                    intervalMs: Number(manager.babysitAutoCapture?.intervalMs || 0),
+                    running: !!manager.babysitAutoCapture?.running,
+                    lastError: String(manager.babysitAutoCapture?.lastError || '')
+                }
+            };
+            return JSON.stringify(state, null, 2);
+        }
+        if (action === 'babysit_prompt' || action === 'user_prompt') {
+            const payload = {
+                taskId: String(args.taskId || args.id || `task-${Date.now()}`),
+                task: String(args.task || args.message || 'hmm... please complete the requested step.'),
+                note: String(args.note || 'wait, was that move necessary?')
+            };
+            const shown = await triggerBabysitPromptInPage(page, payload);
+            if (!shown) return 'Error: Unable to trigger babysit prompt in page context.';
+            return `Babysit prompt shown. taskId=${payload.taskId}`;
+        }
+        if (action === 'practice_mode' || action === 'practice_start') {
+            if (cfg.babysitModeEnabled === false) {
+                return 'Error: Practice mode requires babysit mode to be enabled in config.';
+            }
+
+            const goal = String(args.goal || args.task || 'practice browser workflow').trim();
+            await browser_interact({
+                action: 'babysit_start',
+                goal,
+                followCursor: cfg.babysitFollowCursor !== false,
+                model: cfg.babysitNotesModel || 'gpt-5-nano'
+            }, signal);
+
+            const runResult = await run_autonomous_web_agent({
+                goal,
+                budgetMode: String(args.budgetMode || 'low'),
+                practiceMode: true,
+                forcePlannerProvider: 'openai',
+                forcePlannerModel: 'gpt-5-nano'
+            }, signal);
+
+            await triggerBabysitPromptInPage(page, {
+                taskId: 'practice-review',
+                task: 'hmm... practice pass finished. was that move sequence useful?',
+                note: 'click which move to replay an important step, then mark yes/no.'
+            });
+
+            return `Practice mode run complete.\n${runResult}`;
+        }
+        if (action === 'babysit_snapshot') {
+            const forceEnable = args.forceEnable === true || args.force === true;
+            const hasActiveSession = !!manager.babysitSession?.active;
+            if (cfg.babysitModeEnabled === false && !forceEnable && !hasActiveSession) {
+                return 'Error: Babysit mode is disabled in config. Enable it from rexai open -> Tuning Bay.';
+            }
+            const snapshot = await collectBabysitSnapshot(page, args);
+            const summary = await summarizeBabysitSnapshot(snapshot, {
+                askModel: args.askModel !== false,
+                model: args.model || manager.babysitSession.model || cfg.babysitNotesModel || 'gpt-5-nano'
+            });
+
+            const saveNotes = args.save !== false;
+            let saved = null;
+            if (saveNotes) {
+                saved = persistBabysitNote(snapshot, summary);
+                manager.babysitSession.notesSaved = Number(manager.babysitSession.notesSaved || 0) + 1;
+            }
+            manager.babysitSession.snapshots = Number(manager.babysitSession.snapshots || 0) + 1;
+
+            return JSON.stringify({
+                feature: 'Babysit Snapshot',
+                snapshot,
+                summary,
+                saved,
+                session: manager.babysitSession
+            }, null, 2);
+        }
+        if (action === 'babysit_stop') {
+            stopBabysitAutoCapture();
+            for (const p of manager.pages.filter((x) => x && !x.isClosed())) {
+                await setBabysitCursorFollow(p, false);
+            }
+            const prev = { ...manager.babysitSession };
+            manager.babysitSession.active = false;
+            manager.babysitSession.followCursor = false;
+            await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
+            return `Babysit mode disabled. snapshots=${Number(prev.snapshots || 0)}, notesSaved=${Number(prev.notesSaved || 0)}.`;
+        }
         if (action === 'preflight_analyse' || action === 'preflight_analyze' || action === 'diagnose') {
             const targetAction = String(args.targetAction || args.nextAction || '').trim().toLowerCase();
             const autoHeal = args.autoHeal !== false;
@@ -2023,15 +2958,20 @@ export async function browser_interact(args, signal = null) {
             }
 
             const health = await collectBrowserHealth(page);
-            const recommendation = preflightRecommendation(health, targetAction, readiness);
+            const extensionIntel = await collectPreflightExtensionIntel(page);
+            const recommendation = preflightRecommendation(health, targetAction, readiness, extensionIntel);
+            const legacyRecommendation = preflightRecommendationLegacy(health, targetAction, readiness);
             const report = {
                 feature: 'Preflight Analyse',
+                version: '2.0.0',
                 targetAction: targetAction || 'unspecified',
                 autoHeal,
                 healed: readiness.recovered === true,
                 readiness,
                 health,
-                recommendation
+                recommendation,
+                recommendationLegacy: legacyRecommendation,
+                extensionIntel
             };
 
             report.navigatorAssist = {
@@ -2063,14 +3003,17 @@ export async function browser_interact(args, signal = null) {
         if (action === 'scan' || action === 'analyze_page') {
             const snapshot = await buildInteractiveSnapshot(page);
             const plotSummary = getPreflightAnalysePlotSummary(page.url() || '', 'analyze_page');
+            const extensionIntel = await collectPreflightExtensionIntel(page);
             const summary = {
                 feature: 'Preflight Analyse',
+                version: '2.0.0',
                 page: {
                     url: page.url() || '',
                     title: await page.title().catch(() => 'Unknown')
                 },
                 totalInteractive: snapshot.length,
                 sample: snapshot.slice(0, 40),
+                extensionIntel,
                 extensionAssist: {
                     enabled: manager.usingExtension,
                     extensionPath: manager.extensionPath || ''
@@ -2113,6 +3056,30 @@ export async function browser_interact(args, signal = null) {
             if (isPlaceholderHost(host)) {
                 return `Error: ${host} is a placeholder domain. Use action \"search\" first or provide a real site URL.`;
             }
+
+            const malformedNavigateQuery = String(args.search_query || args.searchQuery || '').trim();
+            if (malformedNavigateQuery) {
+                const fallbackQuery = `${malformedNavigateQuery} site:${host.replace(/^www\./i, '')}`.trim();
+                const searchRes = await resilientSearch(page, fallbackQuery);
+                if (!searchRes.ok) {
+                    return `Error: navigate payload included search_query and fallback search failed: ${searchRes.error}`;
+                }
+                manager.lastHealthyUrl = page.url() || manager.lastHealthyUrl;
+                return `${recoveryPrefix}Auto-corrected navigate+search_query to search. Query: \"${fallbackQuery}\". URL: ${searchRes.url}`;
+            }
+
+            manager.trackNavigationAttempt(safeUrl, 'navigate');
+            const loopSignal = manager.getNavigationLoopSignal(safeUrl);
+            if (loopSignal.looping) {
+                const recoveryQuery = buildSiteScopedRecoveryQuery(safeUrl, args.query || args.goal || args.text || '');
+                const searchRes = await resilientSearch(page, recoveryQuery);
+                if (!searchRes.ok) {
+                    return `Error: repeated navigation loop detected for ${safeUrl}, and recovery search failed: ${searchRes.error}`;
+                }
+                manager.lastHealthyUrl = page.url() || manager.lastHealthyUrl;
+                return `${recoveryPrefix}Detected repeated navigation loop (${loopSignal.repeats}x) for ${safeUrl}. Recovered using search query \"${recoveryQuery}\" at ${searchRes.url}`;
+            }
+
             const nav = await resilientGoto(page, safeUrl, {
                 timeout: 30000,
                 waitUntilPrimary: 'load',
@@ -2388,23 +3355,92 @@ async function getVisiblePageSummary(page, focusQuery = '') {
  * Runs an autonomous loop using headful Playwright to achieve a web goal visually.
  */
 export async function run_autonomous_web_agent(goal, signal = null) {
-    const { runCompletion } = await import('./ai.js');
-    const normalizedGoal = String(goal || '').trim();
+    const { runCompletion, runCompletionWithTarget } = await import('./ai.js');
+    const { loadConfig, resolveModelAlias } = await import('./config.js');
+    const {
+        resolveWebAgentBudget,
+        createWebPlanState,
+        canRequestPlannerStep,
+        notePlannerStepRequested,
+        noteWebPlannerIssue,
+        noteWebPlannerSuccess,
+        noteRecoveryAttempt,
+        applyWebPlannerPayload,
+        advanceWebStepCounter,
+        shouldTerminateForBudget,
+        buildWebPlannerContext,
+        getBudgetExhaustedMessage
+    } = await import('./agent/planEngine.js');
+
+    const parsedInput = (typeof goal === 'object' && goal !== null)
+        ? {
+            goal: String(goal.goal || '').trim(),
+            budgetMode: String(goal.budgetMode || '').trim(),
+            maxSteps: Number(goal.maxSteps),
+            maxPlannerCalls: Number(goal.maxPlannerCalls),
+            maxSubplanDepth: Number(goal.maxSubplanDepth),
+            maxRecoveryAttempts: Number(goal.maxRecoveryAttempts),
+            practiceMode: goal.practiceMode === true,
+            forcePlannerProvider: String(goal.forcePlannerProvider || '').trim(),
+            forcePlannerModel: String(goal.forcePlannerModel || '').trim()
+        }
+        : {
+            goal: String(goal || '').trim(),
+            budgetMode: '',
+            maxSteps: undefined,
+            maxPlannerCalls: undefined,
+            maxSubplanDepth: undefined,
+            maxRecoveryAttempts: undefined,
+            practiceMode: false,
+            forcePlannerProvider: '',
+            forcePlannerModel: ''
+        };
+
+    const normalizedGoal = parsedInput.goal;
     if (!normalizedGoal) return 'Agent Error: Missing goal.';
     if (signal?.aborted) return 'Aborted';
-    
+
     try {
-        const page = await manager.getPage();
+        const config = loadConfig();
+        const budget = resolveWebAgentBudget(config, {
+            mode: parsedInput.budgetMode,
+            maxSteps: parsedInput.maxSteps,
+            maxPlannerCalls: parsedInput.maxPlannerCalls,
+            maxSubplanDepth: parsedInput.maxSubplanDepth,
+            maxRecoveryAttempts: parsedInput.maxRecoveryAttempts
+        });
+
+        const planState = createWebPlanState(normalizedGoal, budget);
+        const runHeadless = parsedInput.budgetMode === 'headless' || !!config.webAgentHeadless;
+        const page = await manager.getPage({ headless: runHeadless });
         await ensureVisualCursor(page, pickBrowserCursorStyle('default'));
 
-        let stepCount = 0;
+        // AutoPilot Routines: try deterministic playbook before first LLM call
         let lastResult = 'Started browser.';
-        let actionHistory = []; // Tracks [{ action, id, url }]
+        const actionHistory = [];
         let authWallCount = 0;
-        let blockerRecoveries = 0;
+        let autopilotRan = false;
 
-        if (isBlankUrl(page.url())) {
+        try {
+            const { tryAutoPilotRoutine } = await import('./autopilotRoutines.js');
+            const autopilot = await tryAutoPilotRoutine(page, normalizedGoal);
+            if (autopilot.matched) {
+                appendAutonomousBrowserDebug({
+                    source: 'autopilot_routine',
+                    routine: autopilot.routineName,
+                    result: autopilot.result
+                });
+                lastResult = `[AutoPilot: ${autopilot.routineName}] ${autopilot.result}`;
+                actionHistory.push({ action: 'autopilot', id: autopilot.routineName, url: page.url() });
+                autopilotRan = true;
+            }
+        } catch (autopilotErr) {
+            // Routine failed silently, continue with normal agent flow
+        }
+
+        if (!autopilotRan && isBlankUrl(page.url())) {
             const initRecovery = await recoverBlankPage(page, { query: normalizedGoal, goal: normalizedGoal });
+            noteRecoveryAttempt(planState, initRecovery.strategy || 'init_blank_recovery');
             if (!initRecovery.ok) {
                 return `Agent Error: Failed to initialize browsing context: ${initRecovery.error}`;
             }
@@ -2413,16 +3449,23 @@ export async function run_autonomous_web_agent(goal, signal = null) {
 
         const initialBlock = await detectAutomationBlockers(page);
         if (initialBlock) {
+            noteWebPlannerIssue(planState, 'initial_blocker', initialBlock);
             const recovery = await resilientSearch(page, normalizedGoal);
+            noteRecoveryAttempt(planState, 'initial_blocker_search');
             if (!recovery.ok) {
                 return `Agent stopped: ${initialBlock}`;
             }
-            lastResult = `Recovered from initial blocker by re-searching goal.`;
+            lastResult = 'Recovered from initial blocker by re-searching goal.';
         }
-        
-        while (stepCount < 35) {
+
+        while (true) {
             if (signal?.aborted) return 'Aborted';
-            stepCount++;
+
+            advanceWebStepCounter(planState);
+            const budgetState = shouldTerminateForBudget(planState);
+            if (budgetState.stop) {
+                return getBudgetExhaustedMessage(planState, normalizedGoal);
+            }
 
             const popupActions = await smartHandleConsentAndOverlays(page, { maxClicks: 3, preferReject: true });
             if (popupActions.clickedCount > 0) {
@@ -2432,51 +3475,51 @@ export async function run_autonomous_web_agent(goal, signal = null) {
 
             const blockedNow = await detectAutomationBlockers(page);
             if (blockedNow) {
-                blockerRecoveries++;
-                if (blockerRecoveries > 2) {
-                    return `Agent stopped at step ${stepCount}: ${blockedNow}`;
-                }
+                noteWebPlannerIssue(planState, 'automation_blocker', blockedNow);
                 await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
                 const recovery = await resilientSearch(page, normalizedGoal);
+                noteRecoveryAttempt(planState, 'blocker_reload_search');
                 if (!recovery.ok) {
-                    return `Agent stopped at step ${stepCount}: ${blockedNow}`;
+                    return `Agent stopped at step ${planState.counters.steps}: ${blockedNow}`;
                 }
-                lastResult = `Recovered from blocker by switching search surface.`;
+                lastResult = 'Recovered from blocker by switching search surface.';
                 continue;
             }
 
             const authState = await detectAuthState(page);
             if (authState.requiresAuth) {
-                authWallCount++;
+                authWallCount += 1;
+                noteWebPlannerIssue(planState, 'auth_wall', authState.hardGateHits.join(', ') || 'login required');
                 if (authWallCount >= 2) {
                     return `Agent paused: login is required and cannot be bypassed safely. Current URL: ${authState.url}. Please complete login manually, then continue with browser_interact action \"wait_for_auth\" or rerun the task.`;
                 }
                 lastResult = `Detected auth wall (${authState.hardGateHits.join(', ') || 'login required'}). Trying non-login bypass controls.`;
                 continue;
-            } else {
-                authWallCount = 0;
             }
-            
+            authWallCount = 0;
+
             let url = page.url();
             if (isBlankUrl(url)) {
                 const recovery = await recoverBlankPage(page, { query: normalizedGoal, goal: normalizedGoal });
+                noteRecoveryAttempt(planState, recovery.strategy || 'blank_recovery');
                 if (!recovery.ok) {
                     return `Agent stopped: browser remained on about:blank and recovery failed: ${recovery.error}`;
                 }
                 url = page.url();
                 lastResult = `Recovered from blank page via ${recovery.strategy}.`;
             }
-            
+
             const markers = await page.evaluate(markerScript).catch((e) => {
                 appendAutonomousBrowserDebug({
                     source: 'run_autonomous_web_agent',
                     phase: 'marker_evaluate',
-                    step: stepCount,
+                    step: planState.counters.steps,
                     url: page.url(),
                     error: e?.message || String(e)
                 });
                 return [];
             });
+
             const pageSummary = await getVisiblePageSummary(page, normalizedGoal);
             const currentUrl = page.url();
             const pageTitle = await page.title().catch(() => 'Unknown');
@@ -2485,7 +3528,6 @@ export async function run_autonomous_web_agent(goal, signal = null) {
             const repeatedScrolling = recentActions.length >= 3 && recentActions.every((a) => a === 'scroll');
             const onSearchEnginePage = /duckduckgo\.com|bing\.com\/search|google\.[^/]+\/search/i.test(currentUrl);
 
-            // Escape hatch: if we keep scrolling on a search page, click the first likely external result.
             if (onSearchEnginePage && repeatedScrolling && Array.isArray(markers) && markers.length > 0) {
                 const candidate = markers.find((m) => {
                     const href = String(m?.href || '');
@@ -2501,6 +3543,7 @@ export async function run_autonomous_web_agent(goal, signal = null) {
                     if (clicked) {
                         await page.waitForLoadState('domcontentloaded', { timeout: 12000 }).catch(() => {});
                         await page.waitForTimeout(900);
+                        noteWebPlannerSuccess(planState, 'auto-opened search result to break repeated scroll loop');
                         lastResult = `Auto-opened search result ${candidate.id} to break scrolling loop.`;
                         actionHistory.push({ action: 'click', id: candidate.id, url: currentUrl });
                         continue;
@@ -2508,27 +3551,47 @@ export async function run_autonomous_web_agent(goal, signal = null) {
                 }
             }
 
-            // Stuck/Loop Detection
+            if (!canRequestPlannerStep(planState)) {
+                return getBudgetExhaustedMessage(planState, normalizedGoal);
+            }
+
             let stuckWarning = '';
             if (actionHistory.length >= 3) {
                 const recent = actionHistory.slice(-3);
-                const allSame = recent.every(h => h.url === currentUrl && h.action === actionHistory[actionHistory.length-1].action && h.id === actionHistory[actionHistory.length-1].id);
+                const latest = actionHistory[actionHistory.length - 1];
+                const allSame = recent.every((h) => h.url === currentUrl && h.action === latest.action && h.id === latest.id);
                 if (allSame) {
-                    stuckWarning = `\n[CRITICAL WARNING: You have performed "${recent[0].action}" on element "${recent[0].id}" 3 times in a row on this same URL. The page state is NOT changing. You are STUCK. DO NOT repeat the same action again. Try a DIFFERENT element, use "back", "refresh", or "search" for a different approach.]\n`;
+                    stuckWarning = `\n[CRITICAL WARNING: You have performed "${recent[0].action}" on element "${recent[0].id}" 3 times in a row on this same URL. You are STUCK. Use a different element or strategy.]\n`;
+                    if (parsedInput.practiceMode) {
+                        await triggerBabysitPromptInPage(page, {
+                            taskId: `practice-stuck-${Date.now()}`,
+                            task: 'hmm... I might be stuck here. was that move useful?',
+                            note: 'click which move to replay, then yes/no to label this move.'
+                        });
+                    }
                 }
             }
 
+            const plannerContext = buildWebPlannerContext(planState, {
+                url: currentUrl,
+                title: pageTitle,
+                lastResult
+            });
+
             const prompt = `You are Rex, an advanced autonomous web agent.
-You are interacting with a browser that has visual numeric markers (e.g., [1], [2]) placed over every clickable element.
+You are interacting with a browser that has visual numeric markers (e.g., [1], [2]) placed over interactive elements.
 
 Goal: ${normalizedGoal}
 Current URL: ${currentUrl}
 Current Page Title: ${pageTitle}
-ACTION HISTORY (Last 5): ${actionHistory.slice(-5).map(h => `${h.action}(${h.id || ''})`).join(' -> ') || 'None'}
+ACTION HISTORY (Last 5): ${actionHistory.slice(-5).map((h) => `${h.action}(${h.id || ''})`).join(' -> ') || 'None'}
 ${stuckWarning}
 Last Action Result: ${lastResult}
 
-VISIBLE PAGE SUMMARY (READ THIS CAREFULLY BEFORE NEW ACTIONS):
+PLANNER STATE:
+${plannerContext}
+
+VISIBLE PAGE SUMMARY:
 - Headings: ${JSON.stringify(pageSummary.headings)}
 - Text excerpt: ${pageSummary.text}
 - Likely answer blocks: ${pageSummary.likelyAnswerBlocks}
@@ -2537,37 +3600,61 @@ VISIBLE PAGE SUMMARY (READ THIS CAREFULLY BEFORE NEW ACTIONS):
 Visible Interactive Elements (ID -> Details):
 ${JSON.stringify(markers, null, 2)}
 
-Analyze the page and decide the next step.
-FACTUAL ANCHORING: You MUST report exactly what you see. If a tool output says "0% chance of rain", do NOT report high likelihood.
-ANSWER-FIRST RULE: If the visible page summary already contains the answer (or strong evidence) for the user's goal, do NOT search/navigate again. Choose "done" and cite the exact evidence from the visible summary.
-If the element you need isn't visible, use "scroll" to see more of the page.
-If you need to view a dropdown, use "hover" on its ID.
-If you hit a dead end, use "back" or "refresh" to escape.
-If you need to discover websites, use "search" instead of guessing domains.
-Never use placeholder domains like example.com, example.org, or example.net.
+Rules:
+- FACTUAL ANCHORING: Do not invent page facts.
+- ANSWER-FIRST: If page summary already answers the goal, choose "done".
+- Use numeric IDs, never guessed CSS selectors.
+- If blocked/failing, update subplan and pivot.
 
-Respond with EXACTLY ONE JSON object using the ReAct framework:
-{"thought": "I previously did X... The page shows Y... I will now do Z because... [Contradiction Check: My plan aligns with observed data]", "action": "search"|"navigate"|"click"|"type"|"scroll"|"hover"|"back"|"refresh"|"done", "url": "...", "id": "numeric_id_here", "text": "...", "query": "...", "reasoning": "..."}
+Respond with exactly one JSON object:
+{"thought":"...","plan":{"objective":"...","tasks":[{"id":"T1","title":"...","status":"pending|in-progress|done|blocked"}]},"execution":{"mode":"main|subplan","currentTaskId":"T1","note":"..."},"subplan":{"id":"SP-1","parentTaskId":"T1","trigger":"...","steps":[{"id":"SP1","title":"...","status":"pending|in-progress|done|blocked"}]},"action":"search|navigate|click|type|scroll|hover|back|refresh|done","url":"...","id":"...","text":"...","query":"...","reasoning":"..."}
+Omit subplan when there is no active issue.`;
 
-IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map above.`;
+            const plannerComplexity = (planState.execution.mode === 'subplan' || planState.counters.issueCount >= 2)
+                ? 'high'
+                : planState.budget.plannerComplexity;
 
-            const rawResponse = await runCompletion([{ role: 'user', content: prompt }], null, 'high');
+            let plannerTarget = null;
+            if (parsedInput.practiceMode && parsedInput.forcePlannerModel) {
+                plannerTarget = {
+                    provider: parsedInput.forcePlannerProvider || 'openai',
+                    model: parsedInput.forcePlannerModel
+                };
+            }
+            if (!plannerTarget && config.multiModelAgentEnabled) {
+                const provider = resolveModelAlias(config.aiModel || '') === 'gemini' ? 'gemini' : 'openai';
+                plannerTarget = {
+                    provider,
+                    model: provider === 'gemini'
+                        ? (config.agentPlannerGeminiModel || 'gemini-2.5-flash')
+                        : (config.agentPlannerOpenAIModel || 'gpt-4o-mini')
+                };
+            }
+
+            notePlannerStepRequested(planState, planState.execution.mode === 'subplan' ? 'subplan' : 'main');
+
+            const rawResponse = plannerTarget
+                ? await runCompletionWithTarget([{ role: 'user', content: prompt }], plannerTarget, signal)
+                : await runCompletion([{ role: 'user', content: prompt }], signal, plannerComplexity);
+
             let command;
             try {
                 command = parseFirstJsonObject(rawResponse);
-            } catch (err) {
-                lastResult = `Failed to parse AI response: ${rawResponse.substring(0, 40)}`;
+            } catch {
+                noteWebPlannerIssue(planState, 'planner_parse_error', String(rawResponse || '').slice(0, 180));
+                lastResult = `Failed to parse AI response: ${String(rawResponse || '').substring(0, 60)}`;
                 continue;
             }
 
             if (!command || !command.action) {
-                lastResult = `Invalid command payload: ${String(rawResponse).substring(0, 60)}`;
+                noteWebPlannerIssue(planState, 'planner_missing_action', String(rawResponse || '').slice(0, 180));
+                lastResult = `Invalid command payload: ${String(rawResponse || '').substring(0, 80)}`;
                 continue;
             }
 
+            applyWebPlannerPayload(planState, command);
             command.action = String(command.action || '').trim().toLowerCase();
 
-            // Record history
             actionHistory.push({
                 action: command.action,
                 id: command.id || command.url || command.query || '',
@@ -2584,38 +3671,56 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
                         return `Goal achieved. Ingredients found:\n- ${ingredients.join('\n- ')}`;
                     }
 
-                    // If the model says done without concrete data, force one more pass instead of ending empty.
-                    lastResult = 'Done requested, but concrete ingredient list not yet extracted. Performing extract_text pass first.';
+                    noteWebPlannerIssue(planState, 'weak_done_claim', 'done without concrete list evidence');
+                    lastResult = 'Done requested, but concrete list not extracted yet. Continuing.';
                     continue;
                 }
+
                 await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
                 return `Goal achieved: ${command.reasoning || command.thought}`;
-            } else if (command.action === 'back') {
+            }
+
+            if (command.action === 'back') {
                 await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
+                noteWebPlannerSuccess(planState, 'navigated back');
                 lastResult = `Navigated back from ${currentUrl}`;
                 await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
                 continue;
-            } else if (command.action === 'refresh') {
+            }
+
+            if (command.action === 'refresh') {
                 await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+                noteWebPlannerSuccess(planState, 'refreshed page');
                 lastResult = `Reloaded ${currentUrl}`;
                 await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
                 continue;
-            } else if (command.action === 'search') {
+            }
+
+            if (command.action === 'search') {
                 try {
                     const q = String(command.query || command.text || normalizedGoal).trim();
                     const searchRes = await resilientSearch(page, q);
                     if (!searchRes.ok) {
+                        noteWebPlannerIssue(planState, 'search_failed', searchRes.error || 'unknown search failure');
+                        noteRecoveryAttempt(planState, 'search_failed');
                         lastResult = `Failed search action: ${searchRes.error}`;
                         continue;
                     }
                     await page.waitForTimeout(1200);
+                    noteWebPlannerSuccess(planState, `search success for ${q.slice(0, 80)}`);
                     lastResult = `Searched for: ${q}`;
                     await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
                 } catch (e) {
+                    noteWebPlannerIssue(planState, 'search_exception', e.message);
+                    noteRecoveryAttempt(planState, 'search_exception');
                     lastResult = `Failed search action: ${e.message}`;
                 }
-            } else if (command.action === 'navigate') {
+                continue;
+            }
+
+            if (command.action === 'navigate') {
                 if (!command.url) {
+                    noteWebPlannerIssue(planState, 'navigate_missing_url', 'missing url');
                     lastResult = 'Navigate action missing url. Use action "search" if destination is unknown.';
                     continue;
                 }
@@ -2624,6 +3729,7 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
                 try {
                     safeUrl = normalizeWebUrl(command.url);
                 } catch (e) {
+                    noteWebPlannerIssue(planState, 'navigate_invalid_url', e.message);
                     lastResult = `Invalid navigate URL: ${e.message}`;
                     continue;
                 }
@@ -2632,86 +3738,121 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
                 if (isPlaceholderHost(host)) {
                     const fallbackQ = String(command.reasoning || command.thought || normalizedGoal).trim();
                     await resilientSearch(page, fallbackQ || normalizedGoal);
+                    noteRecoveryAttempt(planState, 'placeholder_redirect_to_search');
                     await page.waitForTimeout(1000);
                     lastResult = `Blocked placeholder domain ${host}; searched instead for: ${fallbackQ || normalizedGoal}`;
                     continue;
                 }
 
                 if (url === safeUrl) {
-                    lastResult = `Already on ${url}. Skipping redundant navigation. Try searching or clicking an element.`;
+                    lastResult = `Already on ${url}. Skipping redundant navigation.`;
                     await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
-                } else {
-                    const nav = await resilientGoto(page, safeUrl, {
-                        timeout: 30000,
-                        waitUntilPrimary: 'load',
-                        waitUntilFallback: 'domcontentloaded'
-                    });
-                    if (!nav.ok) {
-                        const recovery = await resilientSearch(page, safeUrl);
-                        if (!recovery.ok) {
-                            lastResult = `Failed navigate to ${safeUrl}: ${recovery.error}`;
-                            continue;
-                        }
-                        lastResult = `Navigation to ${safeUrl} blanked. Recovered via search.`;
+                    continue;
+                }
+
+                manager.trackNavigationAttempt(safeUrl, 'autonomous_navigate');
+                const loopSignal = manager.getNavigationLoopSignal(safeUrl);
+                if (loopSignal.looping) {
+                    const fallbackQuery = buildSiteScopedRecoveryQuery(safeUrl, normalizedGoal);
+                    const searchRes = await resilientSearch(page, fallbackQuery);
+                    noteRecoveryAttempt(planState, 'autonomous_navigation_loop_recovery');
+                    if (!searchRes.ok) {
+                        noteWebPlannerIssue(planState, 'navigation_loop_recovery_failed', searchRes.error || 'unknown search recovery failure');
+                        lastResult = `Repeated navigate loop detected for ${safeUrl}, but recovery search failed: ${searchRes.error}`;
                         continue;
                     }
-                    await page.waitForTimeout(600);
-                    lastResult = `Navigated to ${safeUrl}`;
-                    await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
+                    noteWebPlannerSuccess(planState, `loop recovery search: ${fallbackQuery.slice(0, 80)}`);
+                    lastResult = `Detected repeated navigate loop for ${safeUrl}. Recovered by searching: ${fallbackQuery}`;
+                    continue;
                 }
-            } else if (command.action === 'click') {
+
+                const nav = await resilientGoto(page, safeUrl, {
+                    timeout: 30000,
+                    waitUntilPrimary: 'load',
+                    waitUntilFallback: 'domcontentloaded'
+                });
+                if (!nav.ok) {
+                    const recovery = await resilientSearch(page, safeUrl);
+                    noteRecoveryAttempt(planState, 'navigate_blank_recovery');
+                    if (!recovery.ok) {
+                        noteWebPlannerIssue(planState, 'navigate_failed', recovery.error || nav.error || 'unknown navigate failure');
+                        lastResult = `Failed navigate to ${safeUrl}: ${recovery.error}`;
+                        continue;
+                    }
+                    lastResult = `Navigation to ${safeUrl} blanked. Recovered via search.`;
+                    continue;
+                }
+
+                await page.waitForTimeout(600);
+                noteWebPlannerSuccess(planState, `navigated to ${safeUrl}`);
+                lastResult = `Navigated to ${safeUrl}`;
+                await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
+                continue;
+            }
+
+            if (command.action === 'click') {
                 try {
                     const id = Number(command.id);
                     if (!Number.isFinite(id)) {
+                        noteWebPlannerIssue(planState, 'click_invalid_id', String(command.id || '')); 
                         lastResult = `Click action missing/invalid id: ${command.id}`;
                         continue;
                     }
+
                     const selector = `[data-rex-id="${command.id}"]`;
                     await cursorMoveToSelector(page, selector, 250, pickBrowserCursorStyle('click'));
-                    
-                    // Specific check for visibility/interactivity
                     const isVisible = await page.evaluate((sel) => {
                         const el = document.querySelector(sel);
                         if (!el) return false;
                         const rect = el.getBoundingClientRect();
                         return rect.width > 0 && rect.height > 0 && rect.top >= 0;
-                    }, selector).catch((e) => {
-                        appendAutonomousBrowserDebug({
-                            source: 'run_autonomous_web_agent',
-                            phase: 'click_visibility_check',
-                            step: stepCount,
-                            url: page.url(),
-                            selector,
-                            error: e?.message || String(e)
-                        });
-                        return false;
-                    });
+                    }, selector).catch(() => false);
 
                     if (!isVisible) {
-                        lastResult = `Element ID ${command.id} is not visible or stale. Run "evaluate" to see more or scroll.`;
+                        noteWebPlannerIssue(planState, 'click_stale_target', `id ${command.id}`);
+                        lastResult = `Element ID ${command.id} is not visible or stale.`;
                         continue;
                     }
-
 
                     const clicked = await robustClick(page, selector);
                     if (!clicked.ok) {
+                        noteWebPlannerIssue(planState, 'click_failed', clicked.error || 'unknown click failure');
                         lastResult = `Failed click on ID ${command.id}: ${clicked.error}`;
                         continue;
                     }
-                    await cursorClickPulse(page, pickBrowserCursorStyle('click'));
 
+                    await cursorClickPulse(page, pickBrowserCursorStyle('click'));
                     const settled = await settleAfterInteraction(page, { interaction: 'autonomous_click', popupClicks: 2, dropdownWaitMs: 320 });
+                    const interactionDelta = await page.evaluate(() => window.__rexPreflightInteractionDelta || null).catch(() => null);
+                    const mutationDelta = interactionDelta?.mutationDelta || {};
+                    const mutationScore = Number(mutationDelta.added || 0)
+                        + Number(mutationDelta.removed || 0)
+                        + Number(mutationDelta.attributes || 0)
+                        + Number(mutationDelta.text || 0);
+                    if (mutationScore <= 0) {
+                        noteWebPlannerIssue(planState, 'click_low_impact', `id ${command.id} produced no observed mutation delta`);
+                    }
+                    noteWebPlannerSuccess(planState, `clicked id ${command.id}`);
                     const suffix = settled.note ? `; ${settled.note}` : '';
                     lastResult = `Clicked element ID ${command.id} (${clicked.mode}${suffix})`;
-                } catch(e) { lastResult = `Failed click on ID ${command.id}: ${e.message}`; }
-            } else if (command.action === 'type') {
+                    continue;
+                } catch (e) {
+                    noteWebPlannerIssue(planState, 'click_exception', e.message);
+                    lastResult = `Failed click on ID ${command.id}: ${e.message}`;
+                    continue;
+                }
+            }
+
+            if (command.action === 'type') {
                 try {
                     const id = Number(command.id);
                     if (!Number.isFinite(id)) {
+                        noteWebPlannerIssue(planState, 'type_invalid_id', String(command.id || ''));
                         lastResult = `Type action missing/invalid id: ${command.id}`;
                         continue;
                     }
                     if (typeof command.text !== 'string' || !command.text.trim()) {
+                        noteWebPlannerIssue(planState, 'type_missing_text', `id ${command.id}`);
                         lastResult = `Type action missing text for ID ${command.id}.`;
                         continue;
                     }
@@ -2720,56 +3861,91 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
                     await cursorMoveToSelector(page, selector, 230, pickBrowserCursorStyle('type'));
                     const exists = await page.locator(selector).count();
                     if (!exists) {
-                        lastResult = `Element ID ${command.id} is stale or not visible anymore. Re-evaluate the page.`;
+                        noteWebPlannerIssue(planState, 'type_stale_target', `id ${command.id}`);
+                        lastResult = `Element ID ${command.id} is stale or not visible anymore.`;
                         continue;
                     }
-
 
                     const typed = await robustType(page, selector, command.text, true);
                     if (!typed.ok) {
+                        noteWebPlannerIssue(planState, 'type_failed', typed.error || 'unknown type failure');
                         lastResult = `Failed type on ID ${command.id}: ${typed.error}`;
                         continue;
                     }
+
                     await cursorClickPulse(page, pickBrowserCursorStyle('type'));
                     const settled = await settleAfterInteraction(page, { interaction: 'autonomous_type', popupClicks: 2, dropdownWaitMs: 260 });
+                    const interactionDelta = await page.evaluate(() => window.__rexPreflightInteractionDelta || null).catch(() => null);
+                    const mutationDelta = interactionDelta?.mutationDelta || {};
+                    const mutationScore = Number(mutationDelta.added || 0)
+                        + Number(mutationDelta.removed || 0)
+                        + Number(mutationDelta.attributes || 0)
+                        + Number(mutationDelta.text || 0);
+                    if (mutationScore <= 0) {
+                        noteWebPlannerIssue(planState, 'type_low_impact', `id ${command.id} produced no observed mutation delta`);
+                    }
+                    noteWebPlannerSuccess(planState, `typed in id ${command.id}`);
                     const suffix = settled.note ? `; ${settled.note}` : '';
                     lastResult = `Typed into element ID ${command.id} (${typed.mode}${suffix})`;
                     await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
-                } catch(e) { lastResult = `Failed type on ID ${command.id}: ${e.message}`; }
-            } else if (command.action === 'hover') {
+                    continue;
+                } catch (e) {
+                    noteWebPlannerIssue(planState, 'type_exception', e.message);
+                    lastResult = `Failed type on ID ${command.id}: ${e.message}`;
+                    continue;
+                }
+            }
+
+            if (command.action === 'hover') {
                 try {
                     const id = Number(command.id);
                     if (!Number.isFinite(id)) {
+                        noteWebPlannerIssue(planState, 'hover_invalid_id', String(command.id || ''));
                         lastResult = `Hover action missing/invalid id: ${command.id}`;
                         continue;
                     }
+
                     const selector = `[data-rex-id="${command.id}"]`;
                     await cursorMoveToSelector(page, selector, 220, pickBrowserCursorStyle('hover'));
                     const exists = await page.locator(selector).count();
                     if (!exists) {
-                        lastResult = `Element ID ${command.id} is stale or not visible anymore. Re-evaluate the page.`;
+                        noteWebPlannerIssue(planState, 'hover_stale_target', `id ${command.id}`);
+                        lastResult = `Element ID ${command.id} is stale or not visible anymore.`;
                         continue;
                     }
 
                     const hovered = await robustHover(page, selector);
                     if (!hovered.ok) {
+                        noteWebPlannerIssue(planState, 'hover_failed', hovered.error || 'unknown hover failure');
                         lastResult = `Failed hover on ID ${command.id}: ${hovered.error}`;
                         continue;
                     }
+
                     const settled = await settleAfterInteraction(page, { interaction: 'autonomous_hover', popupClicks: 1, dropdownWaitMs: 300 });
+                    noteWebPlannerSuccess(planState, `hovered id ${command.id}`);
                     const suffix = settled.note ? `; ${settled.note}` : '';
                     lastResult = `Hovered over element ID ${command.id} (${hovered.mode}${suffix})`;
                     await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
-                } catch(e) { lastResult = `Failed hover on ID ${command.id}: ${e.message}`; }
-            } else if (command.action === 'scroll') {
+                    continue;
+                } catch (e) {
+                    noteWebPlannerIssue(planState, 'hover_exception', e.message);
+                    lastResult = `Failed hover on ID ${command.id}: ${e.message}`;
+                    continue;
+                }
+            }
+
+            if (command.action === 'scroll') {
                 await page.evaluate(() => window.scrollBy(0, window.innerHeight * 0.6));
                 await page.waitForTimeout(1000);
-                lastResult = `Scrolled down`;
+                noteWebPlannerSuccess(planState, 'scrolled for new targets');
+                lastResult = 'Scrolled down';
                 await cursorParkIdle(page, 'auto', pickBrowserCursorStyle('default'));
+                continue;
             }
-        }
 
-        return `Stopped after 35 steps. Goal not fully reached. Last result: ${lastResult}`;
+            noteWebPlannerIssue(planState, 'unknown_action', String(command.action || ''));
+            lastResult = `Unknown action returned by planner: ${command.action}`;
+        }
     } catch (err) {
         appendAutonomousBrowserDebug({
             source: 'run_autonomous_web_agent',
@@ -2779,4 +3955,10 @@ IMPORTANT: Do NOT guess CSS selectors. Use the numeric "id" provided in the map 
         return `Agent Error: ${err.message}`;
     }
 }
+
+// Internal hooks for focused regression tests around Preflight Analyse v2 scoring.
+export const __webToolsPreflightTestHooks = {
+    scoreTargetCandidate,
+    preflightRecommendation
+};
 

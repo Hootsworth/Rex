@@ -45,6 +45,35 @@ export async function getClipboard() {
     }
 }
 
+export async function getClipboardImage(destPath) {
+    try {
+        if (process.platform === 'win32') {
+            const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+if ([System.Windows.Forms.Clipboard]::ContainsImage()) {
+    $img = [System.Windows.Forms.Clipboard]::GetImage()
+    $img.Save('${destPath.replace(/\\/g, '\\\\')}', [System.Drawing.Imaging.ImageFormat]::Png)
+    Write-Output "true"
+} else {
+    Write-Output "false"
+}`;
+            const { stdout } = await execPromise(`powershell -Command "${psScript.replace(/\n/g, ' ')}"`);
+            return stdout.trim() === 'true';
+        } else if (process.platform === 'darwin') {
+            // Using pngpaste on mac if installed, else fail gracefully
+            try {
+                await execPromise(`pngpaste "${destPath}"`);
+                return true;
+            } catch {
+                return false;
+            }
+        }
+        return false;
+    } catch (err) {
+        return false;
+    }
+}
+
 export async function setClipboard(text) {
     try {
         if (process.platform === 'win32') {

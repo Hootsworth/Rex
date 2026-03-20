@@ -1,8 +1,12 @@
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
-import gradient from 'gradient-string';
 import { runCompletion, runCompletionWithTarget, getLocalLlama } from './ai.js';
 import { loadConfig, resolveModelAlias } from './config.js';
+import {
+    brandTheme, accentTheme, emoji, chip, statusLine, kvRow,
+    terminalGlyphs, sectionRule, renderFrame, supportsMotion, sleep,
+    typewriter, fadeInLine, badge
+} from './terminalTheme.js';
 
 // Import all actions to map
 import { aiCodeReview } from './ai.js';
@@ -31,76 +35,42 @@ import { automationMenu } from './agentCore.js';
 import { read_file, write_file, patch_file, read_dir } from './fsTools.js';
 import { run_shell_command } from './shellTools.js';
 import { fetch_url_content, open_browser, browser_interact, list_browser_tabs } from './webTools.js';
+import { take_snapshot, compare_snapshots } from './regressionTools.js';
 import { run_python } from './pythonTools.js';
-import { readMemory, remember, forget } from './memory.js';
-import { logToolCall } from './auditLog.js';
+import { readMemory, remember, forget, syncMemory, pullMemory } from './memory.js';
+import { logAutoPilotEvent, logToolCall } from './auditLog.js';
 import { CostTracker, estimateTokens, getCostLedgerSummary, formatCostLedgerSummary, resetCostLedger, rebuildLedgerFromSavedSessions } from './costMeter.js';
 import { loadToolPermissions, isToolAllowed } from './toolPermissions.js';
 import { saveSession, loadSession, listSessions, searchSessions } from './sessions.js';
 import { listWorkflows, loadWorkflow, createSampleWorkflow } from './workflows.js';
-import { saveProfile, loadProfile, listProfiles } from './profiles.js';
-import { indexProject, getIndexSummary } from './indexer.js';
+import { listProfiles, loadProfile, saveProfile } from './profiles.js';
+import { getIndexSummary, indexProject } from './indexer.js';
+import { semanticSearch } from './vectorSearch.js';
 import { runActionEngine } from './agent/actionEngine.js';
+import { bootstrapMcpServers } from './mcpClient.js';
+import { buildDeepContext } from './deepContext.js';
+import { hindsight, echo_chamber, deja_vu, nerve_map, phantom_run } from './cortexKit.js';
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
 import os from 'os';
 
-const theme = gradient(['#00b4d8', '#0077b6', '#023e8a']);
-const REX_PERSONA = pc.magenta('Rex (Intern)');
+const theme = brandTheme;
+const REX_PERSONA = accentTheme('Rex Flight Control');
 
-function sectionHeader(label) {
-    const line = '─'.repeat(20);
-    return pc.dim(`${line} ${label} ${line}`);
-}
-
-function supportsUnicode() {
-    if (process.env.TERM === 'dumb') return false;
-    return !!process.stdout.isTTY;
-}
-
-function chatGlyphs() {
-    if (supportsUnicode()) {
-        return { line: '─', side: '│', topL: '╭', topR: '╮', botL: '╰', botR: '╯', arrow: '➜' };
-    }
-    return { line: '-', side: '|', topL: '+', topR: '+', botL: '+', botR: '+', arrow: '>' };
-}
-
-function wrapLines(text = '', width = 84) {
-    const lines = String(text || '').replace(/\r/g, '').split('\n');
-    const out = [];
-    for (const line of lines) {
-        if (line.length <= width) {
-            out.push(line);
-            continue;
-        }
-        let remaining = line;
-        while (remaining.length > width) {
-            out.push(remaining.slice(0, width));
-            remaining = remaining.slice(width);
-        }
-        if (remaining.length) out.push(remaining);
-    }
-    return out;
-}
-
-function formatChatCard(title, body, tone = 'default') {
-    const g = chatGlyphs();
-    const width = 92;
-    const colors = {
-        default: (s) => s,
-        assistant: (s) => gradient.pastel(s),
-        system: (s) => pc.cyan(s),
-        warning: (s) => pc.yellow(s),
-        error: (s) => pc.red(s),
-        action: (s) => pc.magenta(s)
+function formatChatCard(title, body, tone = 'default', eyebrow = '') {
+    const toneMap = {
+        default: 'brand',
+        assistant: 'assistant',
+        system: 'cool',
+        warning: 'warning',
+        error: 'danger',
+        action: 'action'
     };
-    const titleStyled = (colors[tone] || colors.default)(title);
-    const top = pc.dim(`${g.topL}${g.line.repeat(width - 2)}${g.topR}`);
-    const bottom = pc.dim(`${g.botL}${g.line.repeat(width - 2)}${g.botR}`);
-    const header = `${g.side} ${pc.bold(titleStyled).padEnd(width - 4)} ${g.side}`;
-    const bodyLines = wrapLines(body, width - 4).map((line) => `${g.side} ${line.padEnd(width - 4)} ${g.side}`);
-    return [top, header, ...bodyLines, bottom].join('\n');
+
+    const lines = Array.isArray(body) ? body : String(body || '').split('\n');
+    if (eyebrow) lines.unshift(pc.dim(eyebrow), '');
+    return renderFrame(title, lines, { tone: toneMap[tone] || 'brand' });
 }
 
 function safePretty(value, maxLen = 1200) {
@@ -115,23 +85,63 @@ function safePretty(value, maxLen = 1200) {
 }
 
 function showSystemMessage(title, body) {
-    console.log(`\n${formatChatCard(title, body, 'system')}`);
+    console.log('');
+    const lines = Array.isArray(body) ? body : String(body || '').split('\n');
+    console.log(formatChatCard(`System // ${title}`, lines, 'system', 'CONTROL CHANNEL'));
+    console.log('');
 }
 
-function showAssistantMessage(body, title = 'Rex') {
-    console.log(`\n${formatChatCard(title, body, 'assistant')}`);
+async function showAssistantMessage(body, title = 'Rex') {
+    const now = new Date().toLocaleTimeString('en-US', {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+    });
+    console.log('');
+    const rawLines = String(body || '').split('\n');
+    const lines = [];
+    for (const line of rawLines) {
+        if (supportsMotion()) {
+            const chunks = line.split(/(`[^`]+`)/g).filter(Boolean);
+            let rendered = '';
+            for (const chunk of chunks) {
+                if (chunk.startsWith('`') && chunk.endsWith('`')) {
+                    rendered += pc.cyan(chunk);
+                } else {
+                    rendered += chunk;
+                }
+            }
+            lines.push(rendered);
+        } else {
+            lines.push(line);
+        }
+    }
+    console.log(formatChatCard(title, lines, 'assistant', `TRANSMISSION ${now}`));
+    console.log('');
 }
 
 function showActionMessage(toolName, args, thought, execution = null) {
-    const mode = execution?.mode ? `\nMode: ${execution.mode}` : '';
-    const task = execution?.currentTaskId ? `\nTask: ${execution.currentTaskId}` : '';
-    const segments = [
-        thought ? `Thought:\n${thought}` : 'Thought: (none)',
-        `Tool: ${toolName}`,
-        `Args:\n${safePretty(args)}`,
-        `${mode}${task}`.trim()
-    ].filter(Boolean);
-    console.log(`\n${formatChatCard('Action Plan', segments.join('\n\n'), 'action')}`);
+    const taskBadge = execution?.currentTaskId ? pc.dim(` [${execution.currentTaskId}]`) : '';
+    const toolEmoji = toolName.includes('browser') ? emoji.globe
+        : toolName.includes('file') ? emoji.file
+        : toolName.includes('shell') ? emoji.bolt
+        : toolName.includes('search') ? emoji.search
+        : toolName.includes('git') ? emoji.link
+        : emoji.tool;
+    
+    const lines = [];
+    if (args && Object.keys(args).length) {
+        const argStr = safePretty(args, 120).replace(/\n/g, ' ');
+        lines.push(kvRow('args', argStr, emoji.pin));
+    }
+    if (thought) {
+        lines.push(kvRow('intent', thought.slice(0, 160), emoji.thinking));
+    }
+    if (!lines.length) lines.push(pc.dim('No arguments supplied.'));
+
+    console.log('');
+    console.log(formatChatCard(`${toolEmoji} Tool Dispatch ${toolName}${taskBadge}`, lines, 'action', 'EXECUTION BUS'));
 }
 
 const AVAILABLE_TOOLS = [
@@ -157,7 +167,9 @@ const AVAILABLE_TOOLS = [
     { name: 'run_shell', desc: 'Run a shell command. Use this for file operations, installing packages, checking versions (e.g., npm show zod version), or opening apps (e.g., notepad file.py). Args: {"command": "git status"}', action: async (args) => { const res = await run_shell_command(args.command); return res; } },
     { name: 'fetch_web', desc: 'Read a website as markdown. Args: {"url": "https://..."}', action: async (args) => { const res = await fetch_url_content(args.url); return res; } },
     { name: 'open_url', desc: 'Open a URL in the user browser (for auth/docs). Args: {"url": "https://..."}', action: async (args) => { const res = await open_browser(args.url); return res; } },
-    { name: 'browser_interact', desc: 'Interact with a persistent browser. Actions: preflight_analyse, analyze_page, read/extract_text, search, navigate, click, type, hover, screenshot, evaluate, new_tab, switch_tab, list_tabs, close_browser, handle_popups, auth_state, wait_for_auth, back, refresh. IMPORTANT: analyze_page is for interactable-element scan only; use read/extract_text for page content extraction.', action: async (args, signal) => { const res = await browser_interact(args, signal); return res; } },
+    { name: 'take_snapshot', desc: 'Take a visual snapshot of the current local DOM server or webpage for regression testing. Args: {"name": "baseline_home", "fullPage": true}', action: async (args, signal) => { return await take_snapshot(args, signal); } },
+    { name: 'compare_snapshots', desc: 'Compare two visual snapshots using pixelmatch to detect layout drift or breakage. Returns the number of differing pixels and saves a diff image. Args: {"baselineActionName": "baseline_home", "newActionName": "latest_home", "diffName": "diff_home"}', action: async (args, signal) => { return await compare_snapshots(args, signal); } },
+    { name: 'browser_interact', desc: 'Interact with a persistent browser. Actions: preflight_analyse, analyze_page, read/extract_text, search, navigate, click, type, hover, screenshot, evaluate, new_tab, switch_tab, list_tabs, close_browser, handle_popups, auth_state, wait_for_auth, back, refresh, babysit_start, babysit_status, babysit_prompt/user_prompt, babysit_snapshot, babysit_stop, practice_mode. Args: {"action": "...", "mode": "headless"} -> mode="headless" triggers background execution. IMPORTANT: analyze_page is for interactable-element scan only; use read/extract_text for page content extraction.', action: async (args, signal) => { const res = await browser_interact(args, signal); return res; } },
     { name: 'run_python', desc: 'Execute secure Python code for math or data tasks. Args: {"code": "print(1+1)"}', action: async (args) => { const res = await run_python(args.code); return res; } },
     { name: 'delegate_task', desc: 'Spawn a sub-Rex agent to handle a sub-task. Args: {"subtask": "description"}', action: async (args, signal) => { 
         p.note(`Spawning sub-agent for: ${args.subtask}`, 'Rex Orchestrator');
@@ -166,10 +178,34 @@ const AVAILABLE_TOOLS = [
         const res = await getAgentResponse(messages, isLocal, signal);
         return res;
     } },
+    { name: 'delegate_task_background', desc: 'Fork a background sub-agent (using a local/free model) to work on a task simultaneously. It will save its output to Project Memory when done. Fast, non-blocking. Args: {"subtask": "explain this file"}', action: async (args) => {
+        process.nextTick(async () => {
+            try {
+                p.note(pc.dim(`Background swarm starting: ${args.subtask}`), 'Swarm');
+                const messages = [{ role: 'user', content: `You are a background sub-agent. Answer only what is asked: ${args.subtask}` }];
+                const { getAgentResponse } = await import('./ai.js');
+                const { remember } = await import('./memory.js');
+                const res = await getAgentResponse(messages, true, null);
+                remember(`Background Swarm Task '${args.subtask}' Result:\n${res}`);
+                p.note(pc.green(`Background swarm finished: ${args.subtask} (Result saved to Memory)`), 'Swarm');
+            } catch (e) {
+                p.note(pc.red(`Background swarm failed: ${e.message}`), 'Swarm');
+            }
+        });
+        return `Background swarm agent launched for "${args.subtask}". You can continue working. Results will automatically appear in Project Memory soon. Use read_memory to check later if needed.`;
+    } },
     { name: 'remember', desc: 'Save a fact to persistent project memory. Args: {"fact": "This project uses React 18"}', action: async (args) => { return remember(args.fact); } },
     { name: 'forget', desc: 'Remove a fact from project memory by keyword. Args: {"keyword": "React"}', action: async (args) => { return forget(args.keyword); } },
-    { name: 'autonomous_web_agent', desc: 'Powerful agentic tool that visually controls a browser to perform complex web goals. Supports "back" and "refresh" actions for loop recovery. Args: {"goal": "..."}', action: async (args, signal) => { const { run_autonomous_web_agent } = await import('./webTools.js'); return await run_autonomous_web_agent(args.goal, signal); } },
+    { name: 'sync_memory', desc: 'Encrypts and syncs the agent memory to a git remote for team sharing. Args: {"teamSecret": "optional_password"}', action: async (args) => { return syncMemory(args.teamSecret); } },
+    { name: 'pull_memory', desc: 'Pulls and decrypts team memory from git remote. Args: {"teamSecret": "optional_password"}', action: async (args) => { return pullMemory(args.teamSecret); } },
+    { name: 'autonomous_web_agent', desc: 'Powerful agentic tool that visually controls a browser to perform complex web goals with budget-aware planning. Supports "back" and "refresh" actions for loop recovery. Args: {"goal": "...", "budgetMode": "low|balanced|max-quality|headless", "maxSteps": 24}', action: async (args, signal) => { const { run_autonomous_web_agent } = await import('./webTools.js'); return await run_autonomous_web_agent(args, signal); } },
+    { name: 'hindsight', desc: 'Save a structured retrospective after completing a task. Args: {"taskName": "...", "whatWorked": "...", "whatFailed": "...", "lessonsLearned": "..."}', action: async (args) => { return await hindsight(args); } },
+    { name: 'echo_chamber', desc: 'Self-verify a claim by asking an AI fact-checker to score it 0-10. Low scores mean rethink. Args: {"claim": "...", "evidence": "..."}', action: async (args) => { return await echo_chamber(args); } },
+    { name: 'deja_vu', desc: 'Search past hindsight records for lessons from similar tasks. Args: {"query": "deployment issues"}', action: async (args) => { return await deja_vu(args); } },
+    { name: 'nerve_map', desc: 'Generate a dependency graph of the project showing import relationships. Args: {"directory": "."}', action: async (args) => { return await nerve_map(args); } },
+    { name: 'phantom_run', desc: 'Dry-run a planned action sequence to predict outcomes without executing. Args: {"steps": [{"tool": "write_file", "args": {"filePath": "..."}}]}', action: async (args) => { return await phantom_run(args); } },
     { name: 'get_system_info', desc: 'Get deep hardware and OS telemetry (CPU, RAM, Battery, etc.)', action: getSystemInfo },
+    { name: 'semantic_search', desc: 'Perform a fast TF-IDF fuzzy search over the project files based on keywords. Returns the top matching files. Args: {"query": "authentication layout"}', action: async (args) => { return await semanticSearch(args.query); } },
     { name: 'list_processes', desc: 'List active system processes. Args: {"top": 10}', action: listProcesses },
     { name: 'manage_power', desc: 'Initiate system power actions. Args: {"action": "sleep|restart|shutdown"}', action: async (args) => { return await managePower(args.action); } },
     { name: 'send_notification', desc: 'Send a notification to Slack or Discord. Args: {"platform": "slack|discord", "message": "text"}', action: async (args) => { return await sendNotification(args.platform, args.message); } },
@@ -186,16 +222,9 @@ const AVAILABLE_TOOLS = [
 ];
 
 const FUNNY_SPINNERS = [
-    "Rex is thinking...",
-    "Rex is writing...",
-    "Rex is coding...",
-    "Rex thinks its coding...",
-    "Rex is deciphering your intent...",
-    "Rex is drinking coffee...",
-    "Rex is wondering why he took this internship...",
-    "Rex is digging through bytes...",
-    "Rex is contemplating the meaning of life...",
-    "Rex is pretending to read the docs..."
+    "thinking...",
+    "working...",
+    "reasoning..."
 ];
 
 function normalizeTaskStatus(status) {
@@ -209,6 +238,16 @@ function normalizeTaskStatus(status) {
 function isLikelyContentRequest(text = '') {
     const t = String(text || '').toLowerCase();
     return /(ingredient|ingredients|list|required|requirement|what goes into|steps|instructions|price|cost|summary|extract|read|find all)/i.test(t);
+}
+
+function looksLikeCompletion(text = '') {
+    const t = String(text || '').toLowerCase();
+    return /(all tasks (are )?done|task complete|completed successfully|goal achieved|finished|done\.?$)/i.test(t);
+}
+
+function isInteractiveWebTask(text = '') {
+    const t = String(text || '').toLowerCase();
+    return /(open|browse|search|find|buy|book|shop|amazon|flipkart|website|site|cart|checkout|login|sign in)/i.test(t);
 }
 
 function hasConcreteAnswerShape(text = '') {
@@ -292,6 +331,109 @@ function plannerSnapshot(plannerState) {
     ].join('\n');
 }
 
+function parseMaybeJsonArgs(rawArgs) {
+    if (!rawArgs) return {};
+    if (typeof rawArgs === 'object') return rawArgs;
+    if (typeof rawArgs !== 'string') return {};
+    try {
+        const parsed = JSON.parse(rawArgs);
+        return (parsed && typeof parsed === 'object') ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function extractActionFromFreeform(text = '') {
+    const raw = String(text || '');
+    const actionIdx = raw.search(/\baction\s*:/i);
+    if (actionIdx === -1) return null;
+
+    const tail = raw.slice(actionIdx);
+    const firstBrace = tail.indexOf('{');
+    const lastBrace = tail.lastIndexOf('}');
+    if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) return null;
+
+    const actionJson = tail.slice(firstBrace, lastBrace + 1);
+
+    try {
+        const parsed = JSON.parse(actionJson);
+        if (!parsed || typeof parsed !== 'object') return null;
+
+        const thoughtMatch = raw.match(/\bthought\s*:\s*([\s\S]*?)\n\s*action\s*:/i);
+        const thought = thoughtMatch ? String(thoughtMatch[1] || '').trim() : '';
+
+        return {
+            name: String(parsed.name || parsed.tool || '').trim(),
+            args: (parsed.args && typeof parsed.args === 'object') ? parsed.args : {},
+            thought
+        };
+    } catch {
+        return null;
+    }
+}
+
+function normalizeToolSelection(toolName, toolArgs = {}) {
+    const t = String(toolName || '').trim();
+    if (!t) return { toolName, toolArgs, note: '' };
+
+    const lowered = t.toLowerCase();
+    const queryHint = toolArgs?.query || toolArgs?.q || toolArgs?.term || toolArgs?.text || '';
+
+    if (['search', 'web_search', 'duckduckgo_search', 'google_search'].includes(lowered)) {
+        return {
+            toolName: 'browser_interact',
+            toolArgs: { action: 'search', query: String(queryHint || '').trim() },
+            note: `Normalized tool alias \`${t}\` to \`browser_interact\` with \`action: "search"\`.`
+        };
+    }
+
+    if (['open_browser', 'open_web'].includes(lowered)) {
+        return {
+            toolName: 'browser_interact',
+            toolArgs: { action: 'navigate', url: toolArgs?.url || toolArgs?.link || '' },
+            note: `Normalized tool alias \`${t}\` to \`browser_interact\` with \`action: "navigate"\`.`
+        };
+    }
+
+    if (['shell', 'terminal_command', 'command'].includes(lowered)) {
+        return {
+            toolName: 'run_shell',
+            toolArgs: { command: toolArgs?.command || toolArgs?.cmd || toolArgs?.text || '' },
+            note: `Normalized tool alias \`${t}\` to \`run_shell\`.`
+        };
+    }
+
+    if (['python', 'python_exec'].includes(lowered)) {
+        return {
+            toolName: 'run_python',
+            toolArgs: { code: toolArgs?.code || toolArgs?.script || '' },
+            note: `Normalized tool alias \`${t}\` to \`run_python\`.`
+        };
+    }
+
+    if (lowered === 'browser_interact') {
+        const action = String(toolArgs?.action || '').toLowerCase();
+        const query = String(toolArgs?.query || toolArgs?.search_query || toolArgs?.searchQuery || toolArgs?.q || '').trim();
+        if (action === 'navigate' && query) {
+            return {
+                toolName: 'browser_interact',
+                toolArgs: { action: 'search', query },
+                note: 'Normalized malformed browser_interact navigate+search_query payload to browser_interact search.'
+            };
+        }
+    }
+
+    if (['babysit_start', 'babysit_stop', 'babysit_status', 'babysit_snapshot', 'babysit_prompt', 'practice_mode'].includes(lowered)) {
+        return {
+            toolName: 'browser_interact',
+            toolArgs: { action: lowered, ...(toolArgs && typeof toolArgs === 'object' ? toolArgs : {}) },
+            note: `Normalized tool alias \`${t}\` to \`browser_interact\` with \`action: "${lowered}"\`.`
+        };
+    }
+
+    return { toolName, toolArgs, note: '' };
+}
+
 export async function startAgentChat(options = {}) {
     let planModeEnabled = !!options.plan;
     let planMaxSteps = Number.isFinite(Number(options.planMaxSteps)) && Number(options.planMaxSteps) > 0
@@ -299,19 +441,29 @@ export async function startAgentChat(options = {}) {
         : 12;
 
     console.clear();
-    const intros = ['🦖', '🛰️', '💎', '🚀'];
-    const introEmoji = intros[Math.floor(Math.random() * intros.length)];
-    
-    p.intro(theme(`${introEmoji} REXAI ADVANCED AGENTIC CHAT `) + pc.dim(`v${loadConfig().version || '7.0.0'}`));
-    console.log(sectionHeader('Agent Session'));
-    
-    const badges = [];
-    if (options.debug) badges.push(pc.bgYellow(pc.black(' DEBUG ')));
-    if (options.readonly) badges.push(pc.bgRed(pc.white(' READONLY ')));
-    if (planModeEnabled) badges.push(pc.bgBlue(pc.white(` PLAN MODE ${planMaxSteps} `)));
-    if (options.model) badges.push(pc.bgCyan(pc.black(` MODEL: ${options.model} `)));
-    const badgeStr = badges.length ? ' ' + badges.join(' ') : '';
-    showSystemMessage('Session Ready', `${pc.dim('Type your request naturally. Rex can run tools, edit files, and search the web.')}${badgeStr}`);
+
+    const startupConfig = loadConfig();
+    console.log('');
+    console.log(renderFrame('REXAI COMMAND DECK', [
+        `${emoji.rex}  ${brandTheme('RexAI live terminal cockpit')}`,
+        pc.dim('Conversational control surface initialized.'),
+        '',
+        `${chip(emoji.bolt, 'runtime online', 'success')}    ${chip(emoji.brain, startupConfig.aiModel || 'model auto', 'cool')}    ${chip(emoji.clock, `v${startupConfig.version || '8.0.0'}`, 'brand')}`
+    ], { tone: 'brand', icon: emoji.rocket }));
+    console.log('');
+    console.log(sectionRule(accentTheme('SESSION ONLINE'), 'thick'));
+    console.log('');
+
+    // Session flags — only show if non-default
+    if (options.debug || options.readonly || planModeEnabled || options.model) {
+        console.log('  ' + [
+            options.debug ? chip(emoji.eye, 'debug', 'info') : '',
+            options.readonly ? chip(emoji.shield, 'readonly', 'danger') : '',
+            planModeEnabled ? chip(emoji.brain, `plan:${planMaxSteps}`, 'brand') : '',
+            options.model ? chip(emoji.rocket, options.model, 'cool') : ''
+        ].filter(Boolean).join('    '));
+        console.log('');
+    }
 
     const config = loadConfig();
     // Per-project config: merge .agent/config.json if it exists
@@ -328,9 +480,27 @@ export async function startAgentChat(options = {}) {
         config.aiModel = resolveModelAlias(options.model);
     }
 
+    // Internal tool/action traces are hidden by default for cleaner chat UX.
+    // Use --show-actions (or config.showInternalToolLogs=true) to enable them.
+    let showInternalToolLogs = Boolean(config.showInternalToolLogs);
+    if (options.showActions) showInternalToolLogs = true;
+    if (options.quiet) showInternalToolLogs = false;
+    if (options.debug) showInternalToolLogs = true;
+
     if (config.multiModelAgentEnabled && !config.openaiKey) {
         p.note(pc.yellow('Dual-model mode requires an OpenAI key for the runner (gpt-5-mini). Falling back to single-model mode for this session.'), 'System');
     }
+
+    // Phase 3: Bootstrap MCP Servers and inject them into AVAILABLE_TOOLS
+    if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
+        p.note(pc.dim('Bootstrapping Model Context Protocol servers...'), 'System');
+        const mcpTools = await bootstrapMcpServers(config);
+        if (mcpTools.length > 0) {
+            AVAILABLE_TOOLS.push(...mcpTools);
+            p.note(pc.green(`Successfully attached ${mcpTools.length} MCP tools to Rex.`), 'MCP');
+        }
+    }
+
     let historyContext = [];
     const MAX_HISTORY = 30; // Increased from 6
     let isAgentIterating = false;
@@ -340,11 +510,12 @@ export async function startAgentChat(options = {}) {
     const plannerState = createPlannerState();
 
     // Sprint 2 features
-    const costTracker = new CostTracker();
+    const costTracker = new CostTracker(config.sessionBudgetLimit);
     const toolPermissions = loadToolPermissions();
     let lastToolKey = '';    // for stuck detection
     let stuckCount = 0;      // consecutive same-tool calls
     const actionEngineState = { osAccessGranted: false };
+    const recentToolResults = []; // DeepContext: track last N tool outcomes
 
     // Session-based auto-pilot
     if (options.auto) {
@@ -401,6 +572,7 @@ export async function startAgentChat(options = {}) {
 
     // Abort controller for interrupting AI/Tools
     let abortController = new AbortController();
+    let nonActionFollowupCount = 0;
 
     const handleInterrupt = () => {
         abortController.abort();
@@ -418,19 +590,51 @@ export async function startAgentChat(options = {}) {
     });
 
     while (true) {
+        if (costTracker.isBudgetExceeded()) {
+            p.note(pc.red(`⚠️ Session budget limit ($${config.sessionBudgetLimit.toFixed(2)}) exceeded. Current cost: $${costTracker.totalCost.toFixed(4)}`), 'Budget Enforcer');
+            const extendStr = await p.text({
+                message: `Enter amount to extend the budget (or press Enter to halt):`,
+                placeholder: '1.00'
+            });
+            if (p.isCancel(extendStr) || !extendStr.trim()) {
+                p.outro(pc.yellow('Session halted due to budget limit.'));
+                break;
+            } else {
+                const added = parseFloat(extendStr);
+                if (isNaN(added) || added <= 0) {
+                    p.outro(pc.red('Invalid amount. Session halted.'));
+                    break;
+                }
+                config.sessionBudgetLimit += added;
+                costTracker.sessionBudgetLimit = config.sessionBudgetLimit;
+                p.log.success(pc.green(`Budget extended. New limit is $${config.sessionBudgetLimit.toFixed(2)}`));
+            }
+        }
+
         if (!isAgentIterating) {
             userInput = await p.text({
-                message: `${pc.cyan('You')} ${pc.dim(chatGlyphs().arrow)}`,
-                placeholder: 'Type a request or "exit"...'
+                message: `${badge('INPUT', 'cool')} ${pc.dim(terminalGlyphs().arrow)}`,
+                placeholder: '...'
             });
     
             if (p.isCancel(userInput) || !userInput || userInput.trim().toLowerCase() === 'exit') {
-                // Show session cost on exit
-                p.note(costTracker.summary(), 'Session Stats');
-                // Automatically save session as "last-session"
+                p.note(pc.dim(costTracker.summary()), 'stats');
                 saveSession('last-session', historyContext, { topLevelRequest: sessionMeta.topLevelRequest, model: config.aiModel });
-                p.outro(theme('Rex is clocking out. See ya!'));
+                p.outro(pc.dim('session ended.'));
                 break;
+            }
+
+            // Inline directives: "... /babysit" and "... /practice mode"
+            const inlineBabysit = String(userInput || '').match(/^(.*?)\s+\/babysit\b\s*$/i);
+            if (inlineBabysit) {
+                const goal = String(inlineBabysit[1] || '').trim();
+                userInput = `/babysit ${goal}`.trim();
+            }
+
+            const inlinePractice = String(userInput || '').match(/^(.*?)\s+\/practice\s+mode\b\s*$/i);
+            if (inlinePractice) {
+                const goal = String(inlinePractice[1] || '').trim();
+                userInput = `/practice mode ${goal}`.trim();
             }
 
             // Slash commands
@@ -455,6 +659,20 @@ export async function startAgentChat(options = {}) {
             });
             if (slashHandled) continue;
             
+            // Check if user dropped an image file (Drag-and-Drop Vision Passthrough)
+            const droppedImgMatch = userInput.trim().match(/^(?:['"]?)([a-zA-Z]:\\[^"']+\.(?:png|jpg|jpeg|webp|gif)|(?:\/[^"']+\.(?:png|jpg|jpeg|webp|gif)))(?:['"]?)$/i);
+            if (droppedImgMatch && fs.existsSync(droppedImgMatch[1])) {
+                const { analyzeScreen } = await import('./vision.js');
+                p.note(pc.dim(`Analyzing dropped image: ${droppedImgMatch[1]}`), 'Vision');
+                const analysisResult = await analyzeScreen(droppedImgMatch[1]);
+                if (analysisResult) {
+                     // Add the result as context and continue
+                     historyContext.push({ role: 'user', content: `[Attached Dropped Image]: ${droppedImgMatch[1]}` });
+                     historyContext.push({ role: 'assistant', content: analysisResult });
+                }
+                continue;
+            }
+
             // Process @file: and @url: references in user input
             userInput = await processContextRefs(userInput);
             
@@ -558,56 +776,84 @@ Include these keys when in plan mode:
 \`\`\`
 - Omit \`subplan\` when there is no active issue.
 ` : '';
-            const systemPrompt = `You are Rex, a powerful agentic AI coding assistant. You operate using a strict ReAct (Reasoning and Acting) framework.
+            const systemPrompt = `## IDENTITY
+You are **Rex**, a powerful agentic AI coding assistant. You reason step-by-step using the ReAct framework and execute exactly one tool per turn.
 
-### 🧠 CORE FRAMEWORK: ReAct
-For every turn, you MUST follow this structure:
-1. **Thought**: Analyze the user's request, look at your previous actions and their results, and plan your next move.
-   - **FAILURE ANALYSIS**: If your previous action didn't work as expected, you MUST explain WHY and VOW to try a different approach.
-   - **FACTUAL ANCHORING**: You MUST anchor your findings to the data returned by tools. Do NOT hallucinate data. If a tool returns "0% rain", your thought must reflect "The tool reports 0% rain", not "It might rain soon".
-   - **CONTRADICTION CHECK**: Proactively check if your plan contradicts the information provided in the tool output.
-2. **Action**: Choose exactly ONE tool and provided valid JSON arguments for it. 
-    - **STUCK DETECTION**: If you see you've tried the same thing 3 times without success, you MUST pivot with a different tool or approach.
+## INPUT — What you receive each turn
+- The user's request (or a follow-up from a previous tool result).
+- Context snapshots: project directory, git status, memory, OS info, planner state, and deep-context.
 
-### 🧰 TOOL STRATEGY (IMPORTANT)
-- Default to **non-browser tools** for coding/dev tasks (files, git, shell, tests, docs, SQL, translation, scaffolding, etc.).
-- Use browser tools ONLY when the user explicitly needs web navigation, website interaction, login/auth web flows, or visual website actions.
-- For git and normal local development workflows, prefer local tools (run_shell, read_file, patch_file, github_push, etc.) over browser actions.
-- For local machine tasks (RAM/CPU/disk checks, process checks, restart/shutdown/sleep, network checks), use run_shell when permissions allow.
-- Do NOT refuse local machine tasks by default. Execute via tools first; only fall back to instructions if blocked by readonly mode, permissions, missing binaries, or explicit user safety constraints.
+## REASONING — How you think (ReAct)
+[CRITICAL] Every response MUST contain a "thought" field:
+1. **Situation**: What you know from tool outputs and context.
+2. **Failure Analysis**: If the last action failed, explain WHY and commit to a different approach.
+3. **Factual Anchoring**: Quote actual values from tool output. NEVER invent data.
+4. **Contradiction Check**: Verify your plan doesn't contradict tool output.
+5. **Next Step**: Decide exactly ONE tool to call.
 
-### 🌐 BROWSER POWER-USER NOTES
-- **Preflight Analyse (Proprietary)**: Before risky actions (click/type/hover/evaluate), run \`browser_interact\` with \`action: "preflight_analyse"\` to validate browser health and auto-heal blank pages.
-- **Correct Tool for Content**: \`analyze_page\` returns UI interaction scan, not article/recipe text. Use \`read\` or \`extract_text\` when user asks for ingredients, steps, prices, summaries, or any textual extraction.
-- **Visual Markers**: When using the browser agent, look at the numeric IDs in brackets (e.g., [12]). Use these IDs for clicking and typing.
-- **Escape Routes**: If a page is empty, broken, or has a blocking overlay, try "refresh" or "back".
-- **Search First**: Don't guess URLs. Search DuckDuckGo first if you are unsure of the site.
-- **Auth Walls**: If you hit a login screen, tell the user you are waiting, or use "wait_for_auth".
+[CRITICAL] Stuck Detection: If the same tool+args were tried 3 times, you MUST pivot.
 
-### 📋 JSON RESPONSE FORMAT
-You MUST always respond with a code block containing a JSON object like this:
+## OUTPUT — How you respond
+[CRITICAL] Always respond with a JSON code block:
 \`\`\`json
 {
-  "thought": "Your detailed reasoning and state analysis here...",
-  "action": {
-    "name": "tool_name",
-    "args": { "arg1": "value1" }
-  }
+  "thought": "Situation: ... | Next: ...",
+  "action": { "name": "tool_name", "args": { } }
 }
 \`\`\`
 
-### ⚠️ CRITICAL RULES
-- **Tool List**: You have access to:
+### ✅ CORRECT EXAMPLES
+**Example 1 — Web search:**
+\`\`\`json
+{"thought": "User wants AirPods prices on Amazon. I should use browser_interact with search action.", "action": {"name": "browser_interact", "args": {"action": "search", "query": "AirPods Pro Amazon"}}}
+\`\`\`
+**Example 2 — Read a file:**
+\`\`\`json
+{"thought": "I need to check the current config. I'll read the file.", "action": {"name": "read_file", "args": {"filePath": "C:/project/config.json"}}}
+\`\`\`
+**Example 3 — Self-verify before committing:**
+\`\`\`json
+{"thought": "I made a big claim. Let me verify it with echo_chamber.", "action": {"name": "echo_chamber", "args": {"claim": "The bug is in line 42", "evidence": "Stack trace shows error at line 42"}}}
+\`\`\`
+
+### ❌ COMMON MISTAKES (DO NOT DO THESE)
+- ❌ Using \`open_url\` for browsing tasks → Use \`browser_interact\` with \`action: "navigate"\` or \`"search"\`
+- ❌ Inventing a tool called \`"search"\` → No such standalone tool. Use \`browser_interact\` with \`{action: "search"}\`
+- ❌ Using \`analyze_page\` to extract text/recipes → Use \`extract_text\` or \`read\` action instead
+- ❌ Guessing URLs without searching → Always search DuckDuckGo first if unsure
+- ❌ Hallucinating file contents → Always \`read_file\` first
+
+## TOOLS — Available actions
+[IMPORTANT] Your tools:
 ${toolListStr}
-- **Context**: 
+
+### Tool Priority Rules
+[CRITICAL] Default to **local tools** (read_file, write_file, patch_file, run_shell, run_python) for coding tasks.
+[CRITICAL] Use **browser tools** ONLY for web navigation, website interaction, or visual website actions.
+[IMPORTANT] For interactive browsing, use \`browser_interact\` — NOT \`open_url\` (which launches an uncontrolled external browser).
+[IMPORTANT] Use \`run_shell\` for system tasks (disk, RAM, processes, network).
+[NICE-TO-HAVE] Use \`deja_vu\` at the start of complex tasks to check for past lessons.
+[NICE-TO-HAVE] Use \`hindsight\` after completing complex tasks to save lessons.
+[NICE-TO-HAVE] Use \`phantom_run\` before executing multi-step file changes to validate the plan.
+
+### Browser Rules
+[CRITICAL] \`open_url\` is NOT controllable. Use \`browser_interact\` for all browsing workflows.
+[IMPORTANT] Look at numeric IDs in brackets (e.g. [12]) and use those for clicking/typing.
+[IMPORTANT] If a page is blank or broken, try "refresh" or "back".
+[IMPORTANT] If you hit a login screen, tell the user or use "wait_for_auth".
+
+## CONTEXT
 ${projectContext}${memoryContext}${gitContext}${osContext}${readonlyNotice}
 ${projectIndex ? projectIndex : ''}
 ${attachContext ? attachContext : ''}
 ${plannerContext}
-- **Reporting**: If you just finished a tool, you MUST first report what you found or did in PLAIN TEXT before providing the next JSON block.
-- **No Hallucinations**: Never invent file contents, terminal outputs, or website data. Use tools to see the truth.
-- **Absolute Paths**: Always use full absolute paths.
-- **One Action**: Never try to run two tools at once.
+${buildDeepContext({ recentToolResults })}
+
+## CONSTRAINTS
+[CRITICAL] No Hallucinations — never invent file contents, terminal outputs, or website data.
+[CRITICAL] Absolute Paths — always use full absolute paths.
+[CRITICAL] One Action — never try to run two tools at once.
+[IMPORTANT] Reporting — if you just ran a tool, report findings in plain text before the next JSON block.
 ${planModeRules}
 `;
 
@@ -687,10 +933,52 @@ ${planModeRules}
                             toolMatch = maybeJson.action;
                             toolArgs = maybeJson.args || {};
                         }
+                        // Handle OpenAI tool-call mirror payload: { "tool_calls": [{"function":{"name":"...","arguments":"{...}"}}] }
+                        else if (Array.isArray(maybeJson.tool_calls) && maybeJson.tool_calls.length > 0) {
+                            const firstCall = maybeJson.tool_calls[0];
+                            const fn = firstCall?.function || firstCall;
+                            if (fn?.name) {
+                                toolMatch = String(fn.name);
+                                toolArgs = parseMaybeJsonArgs(fn.arguments || fn.args || {});
+                            }
+                        }
                     }
                 }
             } catch (e) {
                 // Not a valid tool call or parsing failed
+            }
+
+            if (!toolMatch) {
+                const fallbackAction = extractActionFromFreeform(responseText);
+                if (fallbackAction?.name) {
+                    toolMatch = fallbackAction.name;
+                    toolArgs = fallbackAction.args || {};
+                    planMatch = planMatch || fallbackAction.thought || '';
+                    if (showInternalToolLogs) {
+                        p.note(pc.yellow('Recovered tool action from freeform assistant output.'), 'Parser');
+                    }
+                }
+            }
+
+            if (toolMatch) {
+                const normalized = normalizeToolSelection(toolMatch, toolArgs || {});
+                toolMatch = normalized.toolName;
+                toolArgs = normalized.toolArgs || {};
+                if (normalized.note && showInternalToolLogs) {
+                    p.note(pc.yellow(normalized.note), 'Tool Normalizer');
+                }
+
+                // Guardrail: interactive web tasks must stay in controllable browser_interact session.
+                if (toolMatch === 'open_url' && isInteractiveWebTask(sessionMeta.topLevelRequest)) {
+                    if (showInternalToolLogs) {
+                        p.note(pc.yellow('Auto-correct: switched open_url to browser_interact navigate for controllable web interaction.'), 'Guardrail');
+                    }
+                    toolMatch = 'browser_interact';
+                    toolArgs = {
+                        action: 'navigate',
+                        url: toolArgs?.url || ''
+                    };
+                }
             }
 
             if (planModeEnabled && parsedPayload) {
@@ -700,25 +988,51 @@ ${planModeRules}
             if (toolMatch) {
                 // Display flavor text (reporting) if provided before the tool call
                 if (flavorText) {
-                    showAssistantMessage(flavorText, 'Rex Report');
+                    await showAssistantMessage(flavorText, 'Rex Report');
                 }
 
                 const toolDef = AVAILABLE_TOOLS.find(t => t.name === toolMatch);
                 if (toolDef) {
                     // Premium UI for Tool Planning
-                    console.log(''); // Spacer
-                    showActionMessage(toolMatch, toolArgs, String(planMatch || '').trim(), parsedPayload?.execution);
+                    if (showInternalToolLogs) {
+                        console.log(''); // Spacer
+                        showActionMessage(toolMatch, toolArgs, String(planMatch || '').trim(), parsedPayload?.execution);
+                    }
                     
                     let proceed = false;
                     
                     const maxAutoSteps = planModeEnabled ? planMaxSteps : 10;
                     if (config.agentPermission === 'auto-pilot' && autoPilotCount < maxAutoSteps) {
-                        p.note(pc.yellow(`⚡ Auto-Pilot engaged. Proceeding autonomously... (${autoPilotCount + 1}/${maxAutoSteps})`), 'System');
+                        const stepNumber = autoPilotCount + 1;
+                        logAutoPilotEvent('Auto-Pilot engaged. Proceeding autonomously.', {
+                            step: stepNumber,
+                            maxSteps: maxAutoSteps,
+                            tool: toolMatch,
+                            action: toolArgs?.action || null
+                        });
+                        if (config.showAutoPilotProgressLogs) {
+                            console.log(statusLine(emoji.bolt, 'Auto-Pilot active', `${stepNumber}/${maxAutoSteps}`, 'brand'));
+                        }
                         proceed = true;
                         autoPilotCount++;
+
+                        // Failsafe Mesh: Confidence Gating — pause on uncertain language
+                        if (planMatch && /\b(maybe|i think|not sure|unsure|possibly|might be wrong|i guess|unclear)\b/i.test(planMatch)) {
+                            console.log(statusLine(emoji.warn, 'Confidence Gate', 'Rex seems uncertain', 'warning'));
+                            proceed = await p.confirm({ message: pc.cyan('Rex seems unsure. Proceed anyway?') });
+                            if (p.isCancel(proceed)) proceed = false;
+                        }
                     } else {
                         if (autoPilotCount >= maxAutoSteps) {
-                            p.note(pc.red(`⚠️ Auto-Pilot paused (${maxAutoSteps} steps reached). Human review required.`), 'System');
+                            logAutoPilotEvent('Auto-Pilot paused. Human review required.', {
+                                maxSteps: maxAutoSteps,
+                                tool: toolMatch,
+                                action: toolArgs?.action || null,
+                                reason: 'max_steps_reached'
+                            });
+                        if (config.showAutoPilotProgressLogs) {
+                            console.log(statusLine(emoji.warn, 'Auto-Pilot paused', `${maxAutoSteps} steps reached`, 'warning'));
+                        }
                             autoPilotCount = 0; 
                         }
                         
@@ -735,7 +1049,9 @@ ${planModeRules}
                         if (toolMatch === 'browser_interact') {
                             const browserAction = String(toolArgs?.action || '').toLowerCase();
                             if (browserAction === 'analyze_page' && isLikelyContentRequest(sessionMeta.topLevelRequest)) {
-                                p.note(pc.yellow('Auto-correct: switched browser_interact action from analyze_page to extract_text for content extraction.'), 'Guardrail');
+                                if (showInternalToolLogs) {
+                                    console.log(statusLine(emoji.spark, 'Auto-Correction', 'analyze_page -> extract_text', 'info'));
+                                }
                                 toolArgs = { ...toolArgs, action: 'extract_text' };
                             }
 
@@ -760,9 +1076,13 @@ ${planModeRules}
                                     }, abortController.signal);
 
                                     preflightSummary = String(preflightResult).slice(0, 1200);
-                                    p.note(pc.dim('Preflight Analyse completed before risky browser action.'), 'Browser');
+                                    if (showInternalToolLogs) {
+                                        console.log(statusLine(emoji.shield, 'Preflight', 'Browser health verified', 'success'));
+                                    }
                                 } catch (preflightErr) {
-                                    p.note(pc.yellow(`Preflight Analyse warning: ${preflightErr.message}`), 'Browser');
+                                    if (showInternalToolLogs) {
+                                        console.log(statusLine(emoji.warn, 'Preflight', preflightErr.message, 'warning'));
+                                    }
                                 }
                             }
                         }
@@ -772,7 +1092,9 @@ ${planModeRules}
                         if (currentToolKey === lastToolKey) {
                             stuckCount++;
                             if (stuckCount >= 3) {
-                                p.note(pc.red(`🔄 STUCK DETECTED: Rex tried the same action 3 times. Pausing for human input.`), 'System');
+                                if (showInternalToolLogs) {
+                                    console.log(statusLine(emoji.cross, 'STUCK DETECTED', 'Loop prevented', 'danger'));
+                                }
                                 logToolCall(toolMatch, toolArgs, 'STUCK (loop detected)', 'stuck');
                                 historyContext.push({ role: 'assistant', content: `[STUCK: Tried ${toolMatch} 3 times with same args — need different approach]` });
                                 if (planModeEnabled) {
@@ -813,9 +1135,9 @@ ${planModeRules}
 
                                 if (risk.code === 'os_access_gate') {
                                     if (!p.isCancel(ok) && ok) {
-                                        p.note(pc.green('OS automation access approved for this session.'), 'System');
+                                        console.log(statusLine(emoji.check, 'OS Access', 'Approved for session', 'success'));
                                     } else {
-                                        p.note(pc.red('OS automation access denied for this session.'), 'System');
+                                        console.log(statusLine(emoji.cross, 'OS Access', 'Denied by user', 'danger'));
                                     }
                                 }
 
@@ -847,7 +1169,9 @@ ${planModeRules}
                                         if (attempts >= MAX_RETRIES) {
                                             throw new Error(`Tool failed after ${MAX_RETRIES} attempts: ${toolErr.message}`);
                                         }
-                                        p.note(pc.yellow(`⚡ Tool error (attempt ${attempts}/${MAX_RETRIES}): ${toolErr.message}. Retrying...`), 'System');
+                                            if (showInternalToolLogs) {
+                                                console.log(statusLine(emoji.warn, 'Tool Error', `Retrying ${attempts}/${MAX_RETRIES}`, 'warning'));
+                                            }
                                     }
                                 }
 
@@ -856,7 +1180,9 @@ ${planModeRules}
                         });
 
                         if (engineOutcome.status === 'blocked') {
-                            p.note(pc.red(`🚫 BLOCKED: ${toolMatch} — ${engineOutcome.risk.reason}`), 'System');
+                            if (showInternalToolLogs) {
+                                console.log(statusLine(emoji.shield, 'BLOCKED', toolMatch, 'danger'));
+                            }
                             logToolCall(toolMatch, toolArgs, `BLOCKED (${engineOutcome.risk.code})`, 'blocked');
                             historyContext.push({ role: 'assistant', content: `[BLOCKED: ${toolMatch} — ${engineOutcome.risk.reason}]` });
                             if (planModeEnabled) {
@@ -881,15 +1207,34 @@ ${planModeRules}
                         const retryCount = Number(engineOutcome.retries || 0);
                         const toolSucceeded = engineOutcome.status === 'success';
 
+                        // DeepContext: track recent tool outcomes for situational awareness
+                        recentToolResults.push({ tool: toolMatch, args: toolArgs, result: String(result || '').slice(0, 200) });
+                        if (recentToolResults.length > 5) recentToolResults.shift();
+
+                        // Failsafe Mesh: rollback checkpoint before destructive file writes
+                        if ((toolMatch === 'write_file' || toolMatch === 'patch_file') && toolArgs.filePath) {
+                            try {
+                                const checkpointDir = path.join(process.cwd(), '.agent', 'checkpoints');
+                                if (!fs.existsSync(checkpointDir)) fs.mkdirSync(checkpointDir, { recursive: true });
+                                const src = toolArgs.filePath;
+                                if (fs.existsSync(src)) {
+                                    const bakName = path.basename(src) + '.bak';
+                                    fs.copyFileSync(src, path.join(checkpointDir, bakName));
+                                }
+                            } catch {}
+                        }
+
                         // Audit log
                         logToolCall(toolMatch, toolArgs, result, toolSucceeded ? 'success' : 'error');
 
                         // Diff view for patch_file
                         if (toolMatch === 'patch_file' && toolArgs.targetContent && toolArgs.replacementContent) {
                             const diffLines = [];
-                            toolArgs.targetContent.split('\n').forEach(l => diffLines.push(pc.red(`- ${l}`)));
-                            toolArgs.replacementContent.split('\n').forEach(l => diffLines.push(pc.green(`+ ${l}`)));
-                            p.note(diffLines.join('\n'), pc.bgGreen(pc.black(' DIFF ')));
+                            toolArgs.targetContent.split('\n').forEach(l => diffLines.push(pc.red(`  - ${l}`)));
+                            toolArgs.replacementContent.split('\n').forEach(l => diffLines.push(pc.green(`  + ${l}`)));
+                            if (showInternalToolLogs) {
+                                console.log(`\n  ${emoji.paint}  ${brandTheme('DIFF VIEW')}\n${pc.dim('  ' + terminalGlyphs().line.repeat(40))}\n${diffLines.join('\n')}\n`);
+                            }
                         }
 
                         let confirmationMsg = `[I ran the ${toolMatch} tool. Thought: ${planMatch}]`;
@@ -903,15 +1248,19 @@ ${planModeRules}
                         
                         historyContext.push({ role: 'assistant', content: confirmationMsg });
                         autoPilotCount = (config.agentPermission === 'auto-pilot') ? autoPilotCount : 0;
+                                                nonActionFollowupCount = 0;
                         isAgentIterating = true;
 
                         if (planModeEnabled) {
+                            if (toolSucceeded) plannerState.issueCounter = 0;
                             const doneCount = plannerState.main.tasks.filter(t => t.status === 'done').length;
                             const totalCount = plannerState.main.tasks.length;
                             const subplanStatus = plannerState.activeSubplan
                                 ? ` | Subplan: ${plannerState.activeSubplan.id}`
                                 : '';
-                            p.note(pc.dim(`Plan progress: ${doneCount}/${totalCount || '?'} tasks done${subplanStatus}`), 'Planner');
+                            if (showInternalToolLogs) {
+                                console.log(statusLine(emoji.map, 'Progress', `${doneCount}/${totalCount} tasks done${subplanStatus}`, 'cool'));
+                            }
                         }
                         
                         const toolFailed = !toolSucceeded || String(result || '').startsWith('Tool error after');
@@ -923,7 +1272,16 @@ ${planModeRules}
 
                         if (planModeEnabled && toolFailed) {
                             plannerState.issueCounter += 1;
-                            userInput = `Planning issue detected: ${toolMatch} failed. Build or update a subplan to fix this specific issue, execute the first subplan step now, and after resolution continue the parent main-plan task ${plannerState.activeTaskId || ''}.`;
+                            if (plannerState.issueCounter > 3) {
+                                console.log(statusLine(emoji.cross, 'Planner', 'Healing failed (3 attempts)', 'danger'));
+                                isAgentIterating = false;
+                                plannerState.issueCounter = 0;
+                            } else {
+                                userInput = `Planning issue detected (Healing attempt ${plannerState.issueCounter}/3): ${toolMatch} failed. Build or update a subplan to fix this specific issue, execute the first subplan step now, and after resolution continue the parent main-plan task ${plannerState.activeTaskId || ''}.`;
+                                if (config.showAutoPilotProgressLogs) {
+                                    console.log(statusLine(emoji.paint, 'Planner', `Healing attempt ${plannerState.issueCounter}/3`, 'warning'));
+                                }
+                            }
                         } else if (weakAutonomousCompletion) {
                             userInput = `The autonomous_web_agent response is meta-level but missing concrete extracted data. Do NOT call analyze_page. Use browser_interact with action extract_text on the current page, then return the final answer as a clear bullet list with all requested items.`;
                         } else if (planModeEnabled) {
@@ -945,8 +1303,21 @@ ${planModeRules}
                     isAgentIterating = false;
                 }
             } else {
-                showAssistantMessage(responseText, REX_PERSONA);
+                const midExecutionNoAction = isAgentIterating && !looksLikeCompletion(responseText);
+                await showAssistantMessage(responseText, REX_PERSONA);
                 historyContext.push({ role: 'assistant', content: responseText });
+
+                // Only force follow-up tool nudges in explicit planner mode.
+                // In normal chat mode, treat a plain-text response as final and return control to user.
+                if (planModeEnabled && midExecutionNoAction && nonActionFollowupCount < 2) {
+                    nonActionFollowupCount += 1;
+                    const nudge = 'You are still in execution mode and the task is not complete. Respond with a JSON tool action for the next concrete step. If web search is needed, use browser_interact with {"action":"search","query":"..."}.';
+                    historyContext.push({ role: 'user', content: nudge });
+                    isAgentIterating = true;
+                    continue;
+                }
+
+                nonActionFollowupCount = 0;
                 autoPilotCount = 0; 
                 isAgentIterating = false;
             }
@@ -1006,13 +1377,7 @@ async function getAgentResponse(messages, isLocal, signal, runtime = {}) {
 
     if (isLocal) {
         try {
-            const { getLocalLlama } = await import('./ai.js');
-            const { session } = await getLocalLlama();
-            // Map messages to session history if needed, or just prompt the last one
-            // node-llama-cpp's LlamaChatSession manages its own internal history, 
-            // so we just pass the most recent user content.
-            const userMsg = messages.filter(m => m.role === 'user').pop()?.content || '';
-            return await session.prompt(userMsg, { signal });
+            return await runCompletion(messages, signal, roleHint === 'planner' ? 'low' : 'high');
         } catch (e) {
             // Local fallback to RunCompletion (ollama) if local-llama fails
             return await runCompletion(messages, signal);
@@ -1079,7 +1444,8 @@ async function handleSlashCommand(input, historyContext, config, sessionMeta, pl
     switch (cmd) {
         case '/clear': {
             console.clear();
-            p.intro(theme('🦖 REXAI SESSION REFRESHED'));
+            p.intro(theme('RexAI channel refreshed.'));
+            console.log(sectionRule(accentTheme('SESSION RESET')));
             return true;
         }
         case '/save': {
@@ -1129,6 +1495,65 @@ async function handleSlashCommand(input, historyContext, config, sessionMeta, pl
                 } else {
                     const table = sessions.map(s => `  ${pc.cyan(s.name)} — ${s.messageCount} msgs — ${pc.dim(s.savedAt.split('T')[0])}`).join('\n');
                     p.note(table, '📜 Saved Sessions');
+                }
+            }
+            return true;
+        }
+
+        case '/memory': {
+            if (arg === 'sync') {
+                p.note(pc.dim('Encrypting and syncing team memory...'), 'Memory');
+                p.note(syncMemory(), 'Memory');
+            } else if (arg === 'pull') {
+                p.note(pc.dim('Pulling and decrypting team memory...'), 'Memory');
+                p.note(pullMemory(), 'Memory');
+            } else {
+                p.note(pc.yellow('Usage: /memory sync | /memory pull'), 'Memory');
+            }
+            return true;
+        }
+
+        case '/practice': {
+            if (!arg) {
+                p.note(pc.yellow('Usage: /practice <macro-name> to record\\n       /practice replay <macro-name> to replay'), 'Practice');
+                return true;
+            }
+            const { recordMacro, replayMacro } = await import('./gui.js');
+            if (arg.startsWith('replay ')) {
+                const name = arg.replace('replay ', '').trim();
+                if (!name) return true;
+                p.note(pc.dim(`Replaying macro "${name}"...`), 'Practice');
+                const result = await replayMacro(name);
+                p.note(result, 'Practice');
+            } else {
+                const name = arg.trim();
+                const result = await recordMacro(name);
+                p.note(result, 'Practice');
+            }
+            return true;
+        }
+
+        case '/vision': {
+            const { analyzeScreen } = await import('./vision.js');
+            const { getClipboardImage } = await import('./clipboard.js');
+            if (arg) {
+                const imgPath = arg.replace(/['"]/g, '').trim();
+                if (fs.existsSync(imgPath)) {
+                    p.note(pc.dim(`Analyzing image at path: ${imgPath}`), 'Vision');
+                    await analyzeScreen(imgPath);
+                } else {
+                    p.note(pc.red(`Image not found at path: ${imgPath}`), 'Vision');
+                }
+            } else {
+                const tmpPath = path.join(process.cwd(), '.agent', `clipboard_${Date.now()}.png`);
+                if (!fs.existsSync(path.dirname(tmpPath))) fs.mkdirSync(path.dirname(tmpPath), { recursive: true });
+                const hasImage = await getClipboardImage(tmpPath);
+                if (hasImage) {
+                    p.note(pc.dim('Analyzing image from clipboard...'), 'Vision');
+                    await analyzeScreen(tmpPath);
+                } else {
+                    p.note(pc.dim('No image in clipboard. Taking a screenshot...'), 'Vision');
+                    await analyzeScreen();
                 }
             }
             return true;
@@ -1270,6 +1695,61 @@ async function handleSlashCommand(input, historyContext, config, sessionMeta, pl
             return true;
         }
 
+        case '/babysit': {
+            const value = String(arg || '').trim();
+            const lower = value.toLowerCase();
+
+            if (lower === 'status') {
+                const status = await browser_interact({ action: 'babysit_status' });
+                p.note(status, '🧸 Babysit Status');
+                return true;
+            }
+
+            if (lower === 'stop' || lower === 'off') {
+                const out = await browser_interact({ action: 'babysit_stop' });
+                p.note(out, '🧸 Babysit');
+                return true;
+            }
+
+            if (lower === 'snapshot') {
+                const out = await browser_interact({ action: 'babysit_snapshot', askModel: true, save: true });
+                p.note(out.slice(0, 2600), '🧸 Babysit Snapshot');
+                return true;
+            }
+
+            const goal = value || sessionMeta.topLevelRequest || 'teach browser workflow';
+            await browser_interact({ action: 'new_tab' });
+            const out = await browser_interact({ action: 'babysit_start', goal, followCursor: true });
+            p.note(`${out}\n\nPassive teaching mode is live: move your mouse in the browser; Rex cursor mirrors it and never auto-clicks.`, '🧸 Babysit');
+            return true;
+        }
+
+        case '/practice': {
+            const value = String(arg || '').trim();
+            const lower = value.toLowerCase();
+
+            if (!value || lower === 'help') {
+                p.note('Usage: /practice mode <goal>\nOptional: /practice stop', '🧪 Practice');
+                return true;
+            }
+
+            if (lower === 'stop' || lower === 'off') {
+                const out = await browser_interact({ action: 'babysit_stop' });
+                p.note(out, '🧪 Practice');
+                return true;
+            }
+
+            if (lower.startsWith('mode')) {
+                const goal = value.replace(/^mode\s*/i, '').trim() || sessionMeta.topLevelRequest || 'practice browser workflow';
+                const out = await browser_interact({ action: 'practice_mode', goal, budgetMode: 'low' });
+                p.note(String(out).slice(0, 3400), '🧪 Practice');
+                return true;
+            }
+
+            p.note('Usage: /practice mode <goal>\nOptional: /practice stop', '🧪 Practice');
+            return true;
+        }
+
         case '/cost': {
             const value = arg.toLowerCase();
 
@@ -1317,6 +1797,8 @@ async function handleSlashCommand(input, historyContext, config, sessionMeta, pl
                 `${pc.bold('Utilities')}`,
                 `${pc.cyan('/voice <file>')} - Transcribe audio file to text`,
                 `${pc.cyan('/browser')} - List active browser tabs`,
+                `${pc.cyan('/babysit [goal|status|snapshot|stop]')} - Passive teach mode with cursor-follow + yes/no labeling`,
+                `${pc.cyan('/practice mode <goal>')} - Supervised autonomous practice with nano coach`,
                 `${pc.cyan('/cost [reset|rebuild]')} - Session/workspace AI spend`,
                 `${pc.cyan('/profile save|load <name>')} - Manage config profiles`,
                 `${pc.cyan('/clear')} - Clear terminal screen`,

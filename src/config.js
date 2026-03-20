@@ -9,23 +9,40 @@ export const MODELS_DIR = path.join(CONFIG_DIR, 'models');
 const DEFAULT_CONFIG = {
   aiModel: 'ollama', // 'ollama', 'openai', or 'local-llama'
   openaiKey: '',
+  openaiModel: 'gpt-5-mini',
   geminiKey: '',
+  geminiModel: 'gemini-2.5-flash',
   claudeKey: '',
   deepseekKey: '',
   ollamaModel: 'llama3:latest', // Default model
+  ollamaForceCpu: true,
+  localLlamaForceCpu: true,
+  localLlamaRetries: 2,
+  localLlamaMaxPromptChars: 7000,
+  localLlamaFallbackToOllama: true,
   selectedLocalModel: 'rex-fast', // Default local model ID
   multiModelAgentEnabled: false,
   agentRunnerProvider: 'openai',
   agentRunnerModel: 'gpt-5-mini',
   agentPlannerOpenAIModel: 'gpt-4o-mini',
   agentPlannerGeminiModel: 'gemini-2.5-flash',
+  webAgentBudgetMode: 'balanced',
+  babysitModeEnabled: true,
+  babysitFollowCursor: true,
+  babysitNotesModel: 'gpt-5-nano',
+  babysitPromptExtensionEnabled: true,
+  babysitAutoSnapshotMs: 18000,
   agentPermission: 'safe', // 'safe' (ask config) or 'auto-pilot' (autonomous)
+  sessionBudgetLimit: 1.0, // Default $1.00 session budget
+  showAutoPilotProgressLogs: false,
+  showInternalToolLogs: false,
   slackWebhookUrl: '',
   discordWebhookUrl: '',
   smtpHost: '',
   smtpPort: 587,
   smtpUser: '',
-  smtpPass: ''
+  smtpPass: '',
+  mcpServers: {}
 };
 
 // Model aliases for quick switching

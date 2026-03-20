@@ -127,6 +127,49 @@ async function run() {
         failures.push(`[FAIL] semantic click path: ${err.message}`);
     }
 
+    // Test 9: repeated navigate calls to same URL should auto-recover from loop via site-scoped search
+    try {
+        await safeCall({ action: 'close_browser' });
+        const targetUrl = 'https://www.amazon.in/airpods';
+        await safeCall({ action: 'navigate', url: targetUrl });
+        await safeCall({ action: 'navigate', url: targetUrl });
+        const loopOut = await safeCall({ action: 'navigate', url: targetUrl });
+        assert(!isHardRuntimeFailure(loopOut), `navigate loop guard hard-crashed: ${loopOut}`);
+        assert(/Detected repeated navigation loop|Recovered using search query/i.test(String(loopOut)), `navigate loop guard did not activate as expected: ${loopOut}`);
+        console.log('[PASS] repeated navigate loop auto-recovery');
+    } catch (err) {
+        failures.push(`[FAIL] repeated navigate loop auto-recovery: ${err.message}`);
+    }
+
+    // Test 10: babysit mode should start, capture lightweight snapshot notes, and stop safely
+    try {
+        const startOut = await safeCall({ action: 'babysit_start', goal: 'Observe amazon product search flow', followCursor: true, model: 'gpt-5-nano', forceEnable: true });
+        assert(!isHardRuntimeFailure(startOut), `babysit_start hard-crashed: ${startOut}`);
+
+        const statusOut = await safeCall({ action: 'babysit_status' });
+        assert(!isHardRuntimeFailure(statusOut), `babysit_status hard-crashed: ${statusOut}`);
+        assert(/"active"\s*:\s*true/i.test(String(statusOut)), `babysit_status did not report active=true: ${statusOut}`);
+
+        const snapshotOut = await safeCall({ action: 'babysit_snapshot', task: 'find airpods listing', askModel: false, save: true });
+        assert(!isHardRuntimeFailure(snapshotOut), `babysit_snapshot hard-crashed: ${snapshotOut}`);
+        assert(String(snapshotOut).includes('Babysit Snapshot'), `babysit_snapshot missing expected payload marker: ${snapshotOut}`);
+
+        const stopOut = await safeCall({ action: 'babysit_stop' });
+        assert(!isHardRuntimeFailure(stopOut), `babysit_stop hard-crashed: ${stopOut}`);
+        console.log('[PASS] babysit mode lifecycle');
+    } catch (err) {
+        failures.push(`[FAIL] babysit mode lifecycle: ${err.message}`);
+    }
+
+    // Test 11: extension-backed user prompt action should remain runtime-safe
+    try {
+        const promptOut = await safeCall({ action: 'babysit_prompt', taskId: 'regression-1', task: 'Click the highlighted result', note: 'If confused, hit Repeat.' });
+        assert(!isHardRuntimeFailure(promptOut), `babysit_prompt hard-crashed: ${promptOut}`);
+        console.log('[PASS] babysit prompt runtime safety');
+    } catch (err) {
+        failures.push(`[FAIL] babysit prompt runtime safety: ${err.message}`);
+    }
+
     await safeCall({ action: 'close_browser' });
 
     if (failures.length > 0) {

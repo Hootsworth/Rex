@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Preflight Analyse Navigator",
-  "description": "Assists RexAI browser automation with stable interaction markers, visibility scoring, and click/type reliability signals.",
-  "version": "1.0.0",
+  "description": "Preflight Analyse v2 for Rex: confidence lanes, stability scoring, obstruction intelligence, and smarter browser readiness signals.",
+  "version": "2.0.0",
   "permissions": [
     "activeTab",
     "tabs",

@@ -40,6 +40,7 @@ let contextInstance = null;
 let loadedLocalModelId = null;
 let openaiClientInstance = null;
 let openaiClientKey = '';
+let localLlamaPromptChain = Promise.resolve();
 
 
 export async function checkOllamaStatus() {
@@ -62,9 +63,24 @@ export async function checkOllamaStatus() {
     });
 }
 
-export async function queryOllama(prompt, model = 'llama3:latest', signal = null) {
+function buildOllamaEnv(forceCpu = false) {
+    if (!forceCpu) return process.env;
+    return {
+        ...process.env,
+        OLLAMA_LLM_LIBRARY: 'cpu',
+        OLLAMA_NUM_GPU: '0'
+    };
+}
+
+export async function queryOllama(prompt, model = 'llama3:latest', signal = null, options = {}) {
+    const forceCpu = !!options.forceCpu;
     return new Promise((resolve, reject) => {
-        const child = spawn('ollama', ['run', model], { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+        const child = spawn('ollama', ['run', model], {
+            shell: false,
+            windowsHide: true,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            env: buildOllamaEnv(forceCpu)
+        });
         let output = '';
 
         if (signal) {
@@ -115,8 +131,11 @@ export async function runCompletion(messages, signal = null, complexity = 'high'
     if (resolvedModel === 'openai') {
         if (!config.openaiKey) throw new Error('OpenAI key is missing! Please configure it in Settings.');
         const openai = getOpenAIClient(config.openaiKey);
-
-        const targetModel = complexity === 'low' ? 'gpt-5-nano' : 'gpt-4o-mini';
+        const allowedOpenAIModels = new Set(['gpt-5-nano', 'gpt-4o-mini', 'gpt-5-mini']);
+        const configuredOpenAIModel = String(config.openaiModel || 'gpt-5-mini').trim();
+        const targetModel = allowedOpenAIModels.has(configuredOpenAIModel)
+            ? configuredOpenAIModel
+            : 'gpt-5-mini';
 
         const response = await createOpenAICompletionWithRetry(openai, {
             model: targetModel,
@@ -137,7 +156,12 @@ export async function runCompletion(messages, signal = null, complexity = 'high'
         if (!config.geminiKey) throw new Error('Gemini key is missing! Please configure it in Settings.');
         if (signal?.aborted) throw new Error('Aborted');
         const genAI = new GoogleGenerativeAI(config.geminiKey);
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+        const allowedGeminiModels = new Set(['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite']);
+        const configuredGeminiModel = String(config.geminiModel || 'gemini-2.5-flash').trim();
+        const selectedGeminiModel = allowedGeminiModels.has(configuredGeminiModel)
+            ? configuredGeminiModel
+            : 'gemini-2.5-flash';
+        const model = genAI.getGenerativeModel({ model: selectedGeminiModel });
         
         const combinedPrompt = formattedMessages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
         
@@ -167,23 +191,91 @@ export async function runCompletion(messages, signal = null, complexity = 'high'
         return msg.content[0].text;
 
     } else if (resolvedModel === 'local-llama') {
-        const { getLocalLlama } = await import('./ai.js');
-        const { session } = await getLocalLlama();
-        // Local Llama session handles its own history, but we can pass the last message
         const lastUserMessage = formattedMessages.filter(m => m.role === 'user').pop()?.content || '';
-        return await session.prompt(lastUserMessage, {
-            signal,
-            onToken: (tokens) => { }
-        });
+        try {
+            return await promptLocalLlamaWithRecovery(lastUserMessage, signal, config);
+        } catch (e) {
+            const allowOllamaFallback = config.localLlamaFallbackToOllama !== false;
+            if (!allowOllamaFallback) throw e;
+            const combinedPrompt = formattedMessages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
+            const forceCpu = !!config.ollamaForceCpu || process.env.POWER_CLI_OLLAMA_FORCE_CPU === '1';
+            return await queryOllama(combinedPrompt, config.ollamaModel, signal, { forceCpu });
+        }
     } else {
         // Use Ollama locally
         try {
             const combinedPrompt = formattedMessages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
-            return await queryOllama(combinedPrompt, config.ollamaModel, signal);
+            const forceCpu = !!config.ollamaForceCpu || process.env.POWER_CLI_OLLAMA_FORCE_CPU === '1';
+            return await queryOllama(combinedPrompt, config.ollamaModel, signal, { forceCpu });
         } catch (e) {
             throw new Error(`Failed to run local model via Ollama: ${e.message}\nPlease ensure Ollama is installed.`);
         }
     }
+}
+
+function isRecoverableLocalLlamaError(err) {
+    const msg = String(err?.message || err || '').toLowerCase();
+    if (!msg) return false;
+    return [
+        'inconsistent sequence positions',
+        'failed to initialize batch',
+        'llama_decode: failed to decode',
+        'vk::device::allocatememory',
+        'erroroutofdevicememory',
+        'ggml_vulkan',
+        'context full',
+        'kv cache'
+    ].some((needle) => msg.includes(needle));
+}
+
+function trimPromptForLocal(prompt, maxChars) {
+    const p = String(prompt || '');
+    if (!maxChars || p.length <= maxChars) return p;
+    return `[Local optimization: prompt trimmed to last ${maxChars} chars for stability.]\n${p.slice(-maxChars)}`;
+}
+
+async function withLocalLlamaLock(task) {
+    const run = localLlamaPromptChain.then(() => task(), () => task());
+    localLlamaPromptChain = run.catch(() => {});
+    return run;
+}
+
+async function promptLocalLlamaWithRecovery(prompt, signal, config) {
+    const retries = Math.max(0, Number(config.localLlamaRetries ?? 2));
+    const maxChars = Math.max(1000, Number(config.localLlamaMaxPromptChars ?? 7000));
+    const safePrompt = trimPromptForLocal(prompt, maxChars);
+
+    return await withLocalLlamaLock(async () => {
+        let lastErr = null;
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            if (signal?.aborted) throw new Error('Aborted');
+            try {
+                const { session } = await getLocalLlama(attempt > 0);
+                return await session.prompt(safePrompt, {
+                    signal,
+                    onToken: () => {}
+                });
+            } catch (err) {
+                lastErr = err;
+                if (signal?.aborted) throw new Error('Aborted');
+                if (!isRecoverableLocalLlamaError(err) || attempt === retries) {
+                    throw err;
+                }
+
+                // Force a context/session reset before retrying recoverable decode/cache faults.
+                try {
+                    const { session } = await getLocalLlama(true);
+                    if (session?.sequence?.clearHistory) {
+                        await session.sequence.clearHistory();
+                    }
+                } catch {
+                    // Best effort; next retry will reconstruct session if needed.
+                }
+            }
+        }
+
+        throw lastErr || new Error('Local Llama failed without an explicit error.');
+    });
 }
 
 export async function runCompletionWithTarget(messages, target = {}, signal = null) {
@@ -368,7 +460,16 @@ export async function getLocalLlama(stateless = false) {
 
     if (!llamaInstance) {
         const { getLlama } = await import('node-llama-cpp');
-        llamaInstance = await getLlama();
+        const preferCpu = !!config.localLlamaForceCpu || process.env.POWER_CLI_LOCAL_LLAMA_FORCE_CPU === '1';
+        if (preferCpu) {
+            try {
+                llamaInstance = await getLlama({ gpu: false });
+            } catch {
+                llamaInstance = await getLlama();
+            }
+        } else {
+            llamaInstance = await getLlama();
+        }
     }
 
     if (loadedLocalModelId && loadedLocalModelId !== modelId) {

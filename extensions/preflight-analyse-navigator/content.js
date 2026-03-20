@@ -2,6 +2,8 @@
   if (window.__rexPreflightNavigatorLoaded) return;
   window.__rexPreflightNavigatorLoaded = true;
 
+  const PREFLIGHT_VERSION = '2.0.0';
+
   const ROOT_ATTR = 'data-rex-preflight-nav';
   const ITEM_ATTR = 'data-rex-nav-id';
   const REX_ID_ATTR = 'data-rex-id';
@@ -16,10 +18,14 @@
     enableAnchors: true,
     enableMutationDelta: true,
     enableObstructionMap: true,
-    enableFormIntent: true
+    enableFormIntent: true,
+    enableActionLanes: true,
+    enableTemporalStability: true,
+    confidenceThreshold: 62
   };
 
   const prevMetaById = new Map();
+  const stabilityById = new Map();
   const mutationStats = { added: 0, removed: 0, attributes: 0, text: 0, lastAt: Date.now() };
   let lastDelta = {
     at: new Date().toISOString(),
@@ -29,8 +35,10 @@
     samples: []
   };
   let pendingInteraction = null;
+  let lastTelemetryAt = 0;
   const OWN_ATTRS = new Set([ITEM_ATTR, REX_ID_ATTR, META_ATTR, ROOT_ATTR]);
 
+  const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
   const sanitize = (v, max = 180) => String(v || '').replace(/\s+/g, ' ').trim().slice(0, max);
 
   const visible = (el) => {
@@ -189,13 +197,122 @@
     return { blocked: false, by: '', byTag: '', byId: '', byClass: '', selfZ, blockerZ: 0 };
   };
 
+  const actionTagsOf = (meta) => {
+    const tags = [];
+    const t = String(meta.tag || '').toLowerCase();
+    const r = String(meta.role || '').toLowerCase();
+    const href = String(meta.href || '');
+
+    if (t === 'a' || r === 'link' || href) tags.push('navigate');
+    if (t === 'button' || r === 'button' || t === 'a') tags.push('click');
+    if (['input', 'textarea', 'select'].includes(t)) tags.push('type');
+    if (t || r) tags.push('hover');
+    return Array.from(new Set(tags));
+  };
+
+  const confidenceOf = (meta) => {
+    let c = 20;
+    c += clamp(Number(meta.score || 0), 0, 50);
+    if (meta.text) c += 10;
+    if (meta.anchorHeading || meta.anchorSection) c += 8;
+    if (meta.label) c += 8;
+    if (meta.formIntent?.primary) c += 8;
+    if (meta.obstruction?.blocked) c -= 44;
+    return clamp(Math.round(c), 0, 100);
+  };
+
+  const updateStability = (meta, seenAt, cycle) => {
+    if (!state.enableTemporalStability) {
+      return { sightings: 1, consecutiveSeen: 1, stabilityScore: 45, seenAt };
+    }
+
+    const id = String(meta.id || '');
+    const prev = stabilityById.get(id) || {
+      firstSeenAt: seenAt,
+      lastSeenAt: seenAt,
+      sightings: 0,
+      consecutiveSeen: 0,
+      lastCycleSeen: cycle
+    };
+
+    const gap = cycle - Number(prev.lastCycleSeen || cycle);
+    const consecutiveSeen = gap <= 1 ? Number(prev.consecutiveSeen || 0) + 1 : 1;
+    const sightings = Number(prev.sightings || 0) + 1;
+    const lifetimeMs = Math.max(1, seenAt - Number(prev.firstSeenAt || seenAt));
+    const sightingRate = sightings / Math.max(1, lifetimeMs / 1000);
+
+    const stabilityScore = clamp(
+      Math.round(18 + Math.min(42, sightings * 6) + Math.min(30, consecutiveSeen * 5) + Math.min(10, sightingRate * 5)),
+      0,
+      100
+    );
+
+    const next = {
+      firstSeenAt: Number(prev.firstSeenAt || seenAt),
+      lastSeenAt: seenAt,
+      sightings,
+      consecutiveSeen,
+      lastCycleSeen: cycle,
+      stabilityScore
+    };
+    stabilityById.set(id, next);
+
+    return {
+      sightings,
+      consecutiveSeen,
+      stabilityScore,
+      seenAt: new Date(seenAt).toISOString()
+    };
+  };
+
+  const buildActionLanes = (ranked) => {
+    const lanes = {
+      click: [],
+      type: [],
+      navigate: [],
+      hover: []
+    };
+
+    for (const item of ranked) {
+      for (const tag of item.actionTags || []) {
+        if (!lanes[tag]) continue;
+        if (lanes[tag].length >= 10) continue;
+        lanes[tag].push(item);
+      }
+    }
+
+    return lanes;
+  };
+
+  const buildRiskProfile = (annotated, obstructionMap) => {
+    const total = Math.max(1, annotated.length);
+    const blockedRatio = Number((obstructionMap.length / total).toFixed(3));
+    const volatility = Number((
+      (Number(lastDelta.counts?.added || 0)
+        + Number(lastDelta.counts?.removed || 0)
+        + Number(lastDelta.counts?.changed || 0)) / total
+    ).toFixed(3));
+
+    let level = 'low';
+    if (blockedRatio >= 0.28 || volatility >= 0.62) level = 'high';
+    else if (blockedRatio >= 0.12 || volatility >= 0.34) level = 'medium';
+
+    return {
+      level,
+      blockedRatio,
+      volatility,
+      totalInteractables: annotated.length,
+      blockedInteractables: obstructionMap.length
+    };
+  };
+
   const makeMeta = (el) => {
     const intent = state.enableFormIntent ? inferFormIntent(el) : { primary: '', tags: [] };
     const obstruction = state.enableObstructionMap ? getObstruction(el) : { blocked: false };
     const headingAnchor = state.enableAnchors ? getHeadingAnchor(el) : '';
     const sectionAnchor = state.enableAnchors ? getSectionAnchor(el) : '';
 
-    return {
+    const meta = {
       id: idFor(el),
       tag: el.tagName.toLowerCase(),
       text: textOf(el),
@@ -209,6 +326,10 @@
       formIntent: intent,
       obstruction
     };
+
+    meta.actionTags = actionTagsOf(meta);
+    meta.confidence = confidenceOf(meta);
+    return meta;
   };
 
   const annotateOne = (el) => {
@@ -285,6 +406,10 @@
   const run = (reason = 'pulse') => {
     if (!state.enabled) return;
 
+    run._cycle = Number(run._cycle || 0) + 1;
+    const cycle = run._cycle;
+    const now = Date.now();
+
     if (document.documentElement.getAttribute(ROOT_ATTR) !== '1') {
       document.documentElement.setAttribute(ROOT_ATTR, '1');
     }
@@ -297,6 +422,7 @@
     for (const el of nodes) {
       if (!visible(el)) continue;
       const meta = annotateOne(el);
+      meta.stability = updateStability(meta, now, cycle);
       annotated.push(meta);
       nextMetaById.set(meta.id, meta);
 
@@ -320,11 +446,77 @@
     window.__rexPreflightData = annotated;
     window.__rexPreflightObstructionMap = obstructionMap;
     window.__rexPreflightSnapshot = {
+      version: PREFLIGHT_VERSION,
       at: new Date().toISOString(),
       total: annotated.length,
       blocked: obstructionMap.length,
       topBlocked: obstructionMap.slice(0, 30)
     };
+
+    const ranked = annotated
+      .map((m) => ({
+        id: m.id,
+        tag: m.tag,
+        text: m.text,
+        selector: m.id ? `[data-rex-id="${m.id}"], [data-rex-nav-id="${m.id}"]` : '',
+        confidence: Number(m.confidence || 0),
+        stability: Number(m.stability?.stabilityScore || 0),
+        actionTags: Array.isArray(m.actionTags) ? m.actionTags : [],
+        anchorHeading: m.anchorHeading || '',
+        anchorSection: m.anchorSection || '',
+        label: m.label || '',
+        obstruction: m.obstruction || { blocked: false }
+      }))
+      .sort((a, b) => {
+        const left = Number(a.confidence || 0) + Number(a.stability || 0) * 0.28;
+        const right = Number(b.confidence || 0) + Number(b.stability || 0) * 0.28;
+        return right - left;
+      });
+
+    const lanes = state.enableActionLanes ? buildActionLanes(ranked) : { click: [], type: [], navigate: [], hover: [] };
+    const riskProfile = buildRiskProfile(annotated, obstructionMap);
+
+    window.__rexPreflightVersion = PREFLIGHT_VERSION;
+    window.__rexPreflightIntelV2 = {
+      version: PREFLIGHT_VERSION,
+      generatedAt: new Date().toISOString(),
+      thresholds: {
+        confidence: Number(state.confidenceThreshold || 62)
+      },
+      riskProfile,
+      actionLanes: lanes,
+      topCandidates: ranked.slice(0, 30),
+      delta: lastDelta,
+      mutationTotals: {
+        added: mutationStats.added,
+        removed: mutationStats.removed,
+        attributes: mutationStats.attributes,
+        text: mutationStats.text
+      }
+    };
+
+    if (now - lastTelemetryAt > 4500) {
+      lastTelemetryAt = now;
+      chrome.runtime.sendMessage({
+        type: 'preflight:recordTelemetry',
+        value: {
+          at: new Date(now).toISOString(),
+          reason,
+          version: PREFLIGHT_VERSION,
+          riskLevel: riskProfile.level,
+          blockedRatio: riskProfile.blockedRatio,
+          volatility: riskProfile.volatility,
+          total: annotated.length
+        }
+      }).catch(() => {});
+    }
+
+    const staleCutoffCycle = Math.max(1, cycle - 4);
+    for (const [id, entry] of stabilityById.entries()) {
+      if (Number(entry.lastCycleSeen || 0) < staleCutoffCycle) {
+        stabilityById.delete(id);
+      }
+    }
   };
 
   const injectStyles = () => {
@@ -454,6 +646,15 @@
   initState().then(() => {
     injectStyles();
     run('init');
+    if (chrome.storage?.onChanged) {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== 'local') return;
+        const next = changes.preflightState?.newValue;
+        if (!next || typeof next !== 'object') return;
+        state = { ...state, ...next };
+        run('config:update');
+      });
+    }
     observer.observe(document.documentElement, {
       childList: true,
       subtree: true,

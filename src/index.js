@@ -14,8 +14,8 @@ import { projectScaffold } from './projectScaffold.js';
 import { deployTools } from './deployTools.js';
 import { regexTools } from './regexTools.js';
 import { runDoctor } from './doctor.js';
-import CFonts from 'cfonts';
 import updateNotifier from 'update-notifier';
+import { brandTheme, menuLabel, sectionRule, terminalGlyphs } from './terminalTheme.js';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const pkg = require('../package.json');
@@ -23,8 +23,7 @@ const pkg = require('../package.json');
 // Professional Update Notifier
 updateNotifier({ pkg }).notify();
 
-const theme = gradient(['#12c2e9', '#c471ed', '#f64f59']);
-const accentTheme = gradient(['#00c9a7', '#00b4d8', '#0077b6']);
+const theme = brandTheme;
 const errorTheme = pc.red;
 const successTheme = pc.green;
 const infoTheme = pc.cyan;
@@ -33,57 +32,6 @@ const warningTheme = pc.yellow;
 const isMac = process.platform === 'darwin';
 const isWindows = process.platform === 'win32';
 const platformLabel = isMac ? 'macOS' : isWindows ? 'Windows' : 'Linux';
-
-function supportsUnicode() {
-    if (process.env.TERM === 'dumb') return false;
-    return process.stdout.isTTY;
-}
-
-function glyphs() {
-    if (supportsUnicode()) {
-        return {
-            bullet: '●',
-            arrow: '➜',
-            spark: '✦',
-            panelL: '╭',
-            panelR: '╮',
-            panelBL: '╰',
-            panelBR: '╯',
-            line: '─',
-            side: '│'
-        };
-    }
-    return {
-        bullet: '*',
-        arrow: '>',
-        spark: '*',
-        panelL: '+',
-        panelR: '+',
-        panelBL: '+',
-        panelBR: '+',
-        line: '-',
-        side: '|'
-    };
-}
-
-function divider(width = 68) {
-    const g = glyphs();
-    return pc.dim(g.line.repeat(width));
-}
-
-function renderPanel(title, lines = []) {
-    const g = glyphs();
-    const width = 74;
-    const top = `${g.panelL}${g.line.repeat(width - 2)}${g.panelR}`;
-    const bottom = `${g.panelBL}${g.line.repeat(width - 2)}${g.panelBR}`;
-    const titleLine = `${g.side} ${pc.bold(accentTheme(title)).padEnd(width - 4)} ${g.side}`;
-    const body = lines.map((line) => `${g.side} ${line.padEnd(width - 4)} ${g.side}`);
-    return [pc.dim(top), titleLine, ...body, pc.dim(bottom)].join('\n');
-}
-
-function menuLabel(icon, title, hint = '') {
-    return `${icon} ${pc.bold(title)}${hint ? ` ${pc.dim('• ' + hint)}` : ''}`;
-}
 
 async function main() {
     const program = new Command();
@@ -430,6 +378,8 @@ async function main() {
         .command('chat')
         .description('Open the interactive RexAI agent chat')
         .option('--debug', 'Show full prompt and token estimates')
+        .option('--quiet', 'Hide internal tool actions and reasoning traces (default behavior)')
+        .option('--show-actions', 'Show internal tool actions and reasoning traces')
         .option('--readonly', 'Block all write operations (read-only mode)')
         .option('--plan', 'Enable planner mode with task list + automatic subplans for issues')
         .option('--plan-max-steps <n>', 'Planner auto-run budget before human review is required (default: 12)')
@@ -460,6 +410,8 @@ async function main() {
             
             await startAgentChat({
                 debug: opts.debug,
+                quiet: opts.quiet,
+                showActions: opts.showActions,
                 readonly: opts.readonly,
                 plan: opts.plan || opts.planMaxSteps !== undefined,
                 planMaxSteps: opts.planMaxSteps ? Number.parseInt(opts.planMaxSteps, 10) : undefined,
@@ -472,7 +424,7 @@ async function main() {
 
     // Provide help output if --commands is passed
     if (process.argv.includes('--commands')) {
-        showComprehensiveHelp(program);
+        await showComprehensiveHelp();
         process.exit(0);
     }
 
@@ -485,70 +437,51 @@ async function main() {
 }
 
 async function runInteractiveMenu() {
-    const intros = ['🦖', '🐉', '🦕', '🐊'];
-    const introEmoji = Math.random() < 0.1 ? '🍄' : intros[Math.floor(Math.random() * intros.length)];
-    const g = glyphs();
+    const g = terminalGlyphs();
 
     console.clear();
-    try {
-        CFonts.say('REXAI', {
-            font: isWindows ? 'block' : 'simple3d',
-            align: 'left',
-            colors: ['#00c9a7', '#00b4d8', '#0077b6'],
-            background: 'transparent',
-            letterSpacing: 1,
-            lineHeight: 1,
-            space: true,
-            maxLength: '0',
-        });
-    } catch {
-        console.log(pc.bold(accentTheme('REXAI')));
-    }
-
-    console.log(renderPanel('Command Center', [
-        `${g.spark} ${pc.bold('Version')} ${pc.dim('v' + pkg.version)}   ${g.spark} ${pc.bold('Platform')} ${pc.dim(platformLabel)}`,
-        `${g.spark} ${pc.bold('Mode')} ${pc.dim('Interactive')}   ${g.spark} ${pc.bold('Tip')} ${pc.dim('Run rexai --commands for full map')}`
-    ]));
-    p.intro(theme(`${introEmoji} REXAI Developer Console`));
+    
+    // Clean typographic header — no CFonts banner
+    console.log('');
+    console.log(`  ${brandTheme('rex')}`);  
+    console.log(`  ${pc.dim(`v${pkg.version}  ·  ${platformLabel}`)}`);  
+    console.log('');
+    console.log(sectionRule());
+    console.log('');
 
     let running = true;
     while (running) {
         const action = await p.select({
-            message: `${g.arrow} Select a workspace lane`,
+            message: pc.dim('choose'),
             options: [
-                { value: 'dev_tools', label: menuLabel('AI', 'Developer Tools', 'review, docs, translate') },
-                { value: 'project_tools', label: menuLabel('PRJ', 'Project Studio', 'health, scaffold, slides') },
-                { value: 'devops_tools', label: menuLabel('OPS', 'DevOps Lane', 'git, docker, deploy') },
-                { value: 'power_tools', label: menuLabel('PWR', 'Power Utilities', 'terminal, system, share') },
-                { value: 'settings', label: menuLabel('CFG', 'Settings', 'model, permissions, webhooks') },
-                ...(Math.random() < 0.2 ? [{ value: 'mystery', label: menuLabel('???', 'Hidden Item', 'curiosity unlocked') }] : []),
-                { value: 'exit', label: menuLabel('BYE', 'Exit Console') }
+                { value: 'dev_tools',    label: menuLabel('01', 'Code',    'review · docs · translate') },
+                { value: 'project_tools',label: menuLabel('02', 'Project', 'health · scaffold · slides') },
+                { value: 'devops_tools', label: menuLabel('03', 'Ship',    'git · docker · deploy') },
+                { value: 'power_tools',  label: menuLabel('04', 'Ops',     'terminal · system · share') },
+                { value: 'settings',     label: menuLabel('05', 'Settings','models · permissions') },
+                { value: 'exit',         label: menuLabel('00', 'Exit',    '', 'muted') }
             ]
         });
 
         if (p.isCancel(action) || action === 'exit') {
-            p.outro(accentTheme('Session closed. Build something legendary.'));
+            p.outro(pc.dim('session ended.'));
             running = false;
             process.exit(0);
         }
 
-        if (action === 'mystery') {
-            p.note(accentTheme('You found the hidden node. Power user energy confirmed.'), 'Secret');
-            continue;
-        }
-
         try {
             switch (action) {
-                case 'dev_tools':
+                case 'dev_tools': {
+                    console.log('');
                     const devAction = await p.select({
-                        message: `${g.arrow} AI Developer Tools`,
+                        message: pc.dim('code tools'),
                         options: [
-                            { value: 'ai_review', label: menuLabel('REV', 'Code Review') },
-                            { value: 'translator', label: menuLabel('TRN', 'File Translator') },
-                            { value: 'sql', label: menuLabel('SQL', 'SQL Generator') },
-                            { value: 'docs', label: menuLabel('DOC', 'Document Generator') },
-                            { value: 'regex', label: menuLabel('RGX', 'Regex Generator') },
-                            { value: 'back', label: menuLabel('BACK', 'Main Dashboard') }
+                            { value: 'ai_review',  label: menuLabel('rev', 'Code Review') },
+                            { value: 'translator', label: menuLabel('trn', 'Translator') },
+                            { value: 'sql',         label: menuLabel('sql', 'SQL Query') },
+                            { value: 'docs',        label: menuLabel('doc', 'Documentation') },
+                            { value: 'regex',       label: menuLabel('rgx', 'Regex') },
+                            { value: 'back',        label: pc.dim('  back') }
                         ]
                     });
                     if (p.isCancel(devAction) || devAction === 'back') break;
@@ -559,18 +492,20 @@ async function runInteractiveMenu() {
                     if (devAction === 'docs') { const { docsAiGenerator } = await import('./docsAi.js'); await docsAiGenerator(); }
                     if (devAction === 'regex') await regexTools();
                     break;
+                }
 
-                case 'project_tools':
+                case 'project_tools': {
+                    console.log('');
                     const projAction = await p.select({
-                        message: `${g.arrow} Project Studio`,
+                        message: pc.dim('project tools'),
                         options: [
-                            { value: 'health', label: menuLabel('HLT', 'Project Health Scan') },
-                            { value: 'doctor', label: menuLabel('DOC', 'Doctor (Secure Diagnose + Fix)') },
-                            { value: 'scaffold', label: menuLabel('SCA', 'Quick File Scaffold') },
-                            { value: 'project_scaffold', label: menuLabel('BLD', 'Full Project Scaffold') },
-                            { value: 'env', label: menuLabel('ENV', 'Env Secret Generator') },
-                            { value: 'slides', label: menuLabel('SLD', 'Markdown to Slides') },
-                            { value: 'back', label: menuLabel('BACK', 'Main Dashboard') }
+                            { value: 'health',           label: menuLabel('hlt', 'Health Scan') },
+                            { value: 'doctor',           label: menuLabel('doc', 'Doctor') },
+                            { value: 'scaffold',         label: menuLabel('sca', 'Quick Scaffold') },
+                            { value: 'project_scaffold', label: menuLabel('bld', 'Full Project') },
+                            { value: 'env',              label: menuLabel('env', 'Env Template') },
+                            { value: 'slides',           label: menuLabel('sld', 'Slides') },
+                            { value: 'back',             label: pc.dim('  back') }
                         ]
                     });
                     if (p.isCancel(projAction) || projAction === 'back') break;
@@ -582,15 +517,17 @@ async function runInteractiveMenu() {
                     if (projAction === 'env') { const { generateEnvExample } = await import('./env.js'); await generateEnvExample(); }
                     if (projAction === 'slides') { const { markdownToSlides } = await import('./slides.js'); await markdownToSlides(); }
                     break;
+                }
 
-                case 'devops_tools':
+                case 'devops_tools': {
+                    console.log('');
                     const devopsAction = await p.select({
-                        message: `${g.arrow} DevOps Lane`,
+                        message: pc.dim('ship'),
                         options: [
-                            { value: 'git_push', label: menuLabel('GIT', 'Quick Git Commit & Push') },
-                            { value: 'docker_push', label: menuLabel('DCK', 'Quick Docker Build & Push') },
-                            { value: 'deploy', label: menuLabel('DEP', 'Instant Deploy') },
-                            { value: 'back', label: menuLabel('BACK', 'Main Dashboard') }
+                            { value: 'git_push',    label: menuLabel('git', 'Git Push') },
+                            { value: 'docker_push', label: menuLabel('dck', 'Docker Push') },
+                            { value: 'deploy',      label: menuLabel('dep', 'Deploy') },
+                            { value: 'back',        label: pc.dim('  back') }
                         ]
                     });
                     if (p.isCancel(devopsAction) || devopsAction === 'back') break;
@@ -599,24 +536,26 @@ async function runInteractiveMenu() {
                     if (devopsAction === 'docker_push') await quickDockerPush();
                     if (devopsAction === 'deploy') await deployTools();
                     break;
+                }
 
-                case 'power_tools':
+                case 'power_tools': {
+                    console.log('');
                     const powerAction = await p.select({
-                        message: `${g.arrow} Power Utilities`,
+                        message: pc.dim('ops'),
                         options: [
-                            { value: 'terminal_gen', label: menuLabel('CMD', 'AI Terminal Command Gen') },
-                            { value: 'system', label: menuLabel('SYS', 'System Info & Control') },
-                            { value: 'connect', label: menuLabel('CNX', 'Platform Connectors') },
-                            { value: 'vision', label: menuLabel('VIS', 'Agentic Vision') },
-                            { value: 'automate', label: menuLabel('AUT', 'Advanced Automation') },
-                            { value: 'media', label: menuLabel('MED', 'Media Control') },
-                            { value: 'clip', label: menuLabel('CLP', 'Clipboard') },
-                            { value: 'mail', label: menuLabel('ML', 'Email Alerts') },
-                            { value: 'gui', label: menuLabel('GUI', 'GUI Control') },
-                            { value: 'share', label: menuLabel('SHR', 'Share Local Port') },
-                            { value: 'hooks', label: menuLabel('HOK', 'Manage AI Git Hooks') },
-                            { value: 'plugins', label: menuLabel('PLG', 'Run Custom Plugins') },
-                            { value: 'back', label: menuLabel('BACK', 'Main Dashboard') }
+                            { value: 'terminal_gen', label: menuLabel('cmd', 'Terminal') },
+                            { value: 'system',      label: menuLabel('sys', 'System') },
+                            { value: 'connect',     label: menuLabel('cnx', 'Connectors') },
+                            { value: 'vision',      label: menuLabel('vis', 'Vision') },
+                            { value: 'automate',    label: menuLabel('aut', 'Automation') },
+                            { value: 'media',       label: menuLabel('med', 'Media') },
+                            { value: 'clip',        label: menuLabel('clp', 'Clipboard') },
+                            { value: 'mail',        label: menuLabel('ml',  'Email') },
+                            { value: 'gui',         label: menuLabel('gui', 'GUI') },
+                            { value: 'share',       label: menuLabel('shr', 'Share Port') },
+                            { value: 'hooks',       label: menuLabel('hok', 'Git Hooks') },
+                            { value: 'plugins',     label: menuLabel('plg', 'Plugins') },
+                            { value: 'back',        label: pc.dim('  back') }
                         ]
                     });
                     if (p.isCancel(powerAction) || powerAction === 'back') break;
@@ -631,15 +570,16 @@ async function runInteractiveMenu() {
                     if (powerAction === 'mail') { const { emailMenu } = await import('./email.js'); await emailMenu(); }
                     if (powerAction === 'gui') { const { guiMenu } = await import('./gui.js'); await guiMenu(); }
                     if (powerAction === 'share') {
-                        const port = await p.text({ message: 'Port to share:', initialValue: '3000' });
+                        const port = await p.text({ message: 'Port:', initialValue: '3000' });
                         if (!p.isCancel(port)) { const { sharePort } = await import('./share.js'); await sharePort(port); }
                     }
                     if (powerAction === 'hooks') {
-                        const hAction = await p.select({ message: 'Git Hooks:', options: [{ value: 'install', label: '✅ Install' }, { value: 'remove', label: '❌ Remove' }] });
+                        const hAction = await p.select({ message: pc.dim('hooks'), options: [{ value: 'install', label: 'install' }, { value: 'remove', label: 'remove' }] });
                         if (!p.isCancel(hAction)) { const { handleHooks } = await import('./hooks.js'); await handleHooks(hAction); }
                     }
                     if (powerAction === 'plugins') { const { runPlugins } = await import('./plugins.js'); await runPlugins(); }
                     break;
+                }
 
                 case 'settings':
                     await handleSettings();
@@ -650,9 +590,11 @@ async function runInteractiveMenu() {
         }
 
         if (running) {
-            const continu = await p.confirm({ message: 'Do you want to perform another action?', initialValue: true });
+            console.log('');
+            console.log(sectionRule());
+            const continu = await p.confirm({ message: pc.dim('continue?'), initialValue: true });
             if (!continu || p.isCancel(continu)) {
-                p.outro(accentTheme('Session closed. Build something legendary.'));
+                p.outro(pc.dim('session ended.'));
                 running = false;
             }
         }
@@ -661,12 +603,9 @@ async function runInteractiveMenu() {
 
 async function handleSettings() {
     let config = loadConfig();
-    const g = glyphs();
+    const g = terminalGlyphs();
 
-    console.log(divider());
-    console.log(accentTheme(`${g.spark} Settings Console (${platformLabel})`));
-    console.log(pc.dim('Tune model routing, permissions, and connector secrets.'));
-    console.log(divider());
+    console.log('');
     
     const permissionChoice = await p.select({
         message: `${g.arrow} Agent permission profile`,
@@ -685,8 +624,8 @@ async function handleSettings() {
         options: [
             { value: 'ollama', label: '🦙 Ollama (Local, Free, Resource Friendly)' },
             { value: 'local-llama', label: '🦖 Local Llama (Native, Offline, No Ollama Req.)' },
-            { value: 'openai', label: '🟢 OpenAI (Requires API Key) [gpt-4o-mini]' },
-            { value: 'gemini', label: '🟦 Google Gemini (Requires API Key) [gemini-2.5-flash]' },
+            { value: 'openai', label: '🟢 OpenAI (Requires API Key) [gpt-5-nano | gpt-4o-mini | gpt-5-mini]' },
+            { value: 'gemini', label: '🟦 Google Gemini (Requires API Key) [gemini-2.5-flash | gemini-2.0-flash | gemini-2.5-flash-lite]' },
             { value: 'claude', label: '🟧 Anthropic Claude (Requires API Key) [claude-3-5-haiku]' },
             { value: 'deepseek', label: '🐋 Deepseek (Requires API Key) [deepseek-chat]' }
         ],
@@ -758,6 +697,34 @@ async function handleSettings() {
             initialValue: config[propName] || '',
         });
         if (!p.isCancel(key)) config[propName] = key;
+
+        if (config.aiModel === 'openai') {
+            const openaiModel = await p.select({
+                message: `${g.arrow} OpenAI model`,
+                options: [
+                    { value: 'gpt-5-nano', label: 'gpt-5-nano (fastest / lowest cost)' },
+                    { value: 'gpt-4o-mini', label: 'gpt-4o-mini (balanced)' },
+                    { value: 'gpt-5-mini', label: 'gpt-5-mini (best quality of the three)' }
+                ],
+                initialValue: config.openaiModel || 'gpt-5-mini'
+            });
+
+            if (!p.isCancel(openaiModel)) config.openaiModel = openaiModel;
+        }
+
+        if (config.aiModel === 'gemini') {
+            const geminiModel = await p.select({
+                message: `${g.arrow} Gemini model`,
+                options: [
+                    { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash (best quality)' },
+                    { value: 'gemini-2.0-flash', label: 'gemini-2.0-flash (stable + fast)' },
+                    { value: 'gemini-2.5-flash-lite', label: 'gemini-2.5-flash-lite (cheapest / fastest)' }
+                ],
+                initialValue: config.geminiModel || 'gemini-2.5-flash'
+            });
+
+            if (!p.isCancel(geminiModel)) config.geminiModel = geminiModel;
+        }
     }
 
     const dualMode = await p.confirm({
@@ -794,6 +761,58 @@ async function handleSettings() {
         }
     }
 
+    const babysitEnabled = await p.confirm({
+        message: `${g.arrow} Enable Babysit mode (user-guided browser assist)?`,
+        initialValue: config.babysitModeEnabled !== false
+    });
+    if (p.isCancel(babysitEnabled)) return;
+    config.babysitModeEnabled = Boolean(babysitEnabled);
+
+    const babysitFollowCursor = await p.confirm({
+        message: `${g.arrow} Babysit default: mirror user's cursor with Rex cursor?`,
+        initialValue: config.babysitFollowCursor !== false
+    });
+    if (p.isCancel(babysitFollowCursor)) return;
+    config.babysitFollowCursor = Boolean(babysitFollowCursor);
+
+    const babysitModel = await p.select({
+        message: `${g.arrow} Babysit notes model`,
+        options: [
+            { value: 'gpt-5-nano', label: 'gpt-5-nano (recommended lightweight observer)' },
+            { value: 'gpt-4o-mini', label: 'gpt-4o-mini (higher quality, more cost)' },
+            { value: 'gpt-5-mini', label: 'gpt-5-mini (best quality of the three)' }
+        ],
+        initialValue: config.babysitNotesModel || 'gpt-5-nano'
+    });
+    if (p.isCancel(babysitModel)) return;
+    config.babysitNotesModel = babysitModel;
+
+    const babysitPromptExtensionEnabled = await p.confirm({
+        message: `${g.arrow} Enable Babysit popup extension prompts?`,
+        initialValue: config.babysitPromptExtensionEnabled !== false
+    });
+    if (p.isCancel(babysitPromptExtensionEnabled)) return;
+    config.babysitPromptExtensionEnabled = Boolean(babysitPromptExtensionEnabled);
+
+    const babysitAutoSnapshotMs = await p.text({
+        message: `${g.arrow} Babysit auto snapshot interval (ms)`,
+        initialValue: String(config.babysitAutoSnapshotMs || 18000)
+    });
+    if (p.isCancel(babysitAutoSnapshotMs)) return;
+    {
+        const parsed = Number.parseInt(String(babysitAutoSnapshotMs), 10);
+        config.babysitAutoSnapshotMs = Number.isFinite(parsed) && parsed >= 8000 ? parsed : 18000;
+    }
+
+    p.note(
+        `Babysit: ${config.babysitModeEnabled ? 'enabled' : 'disabled'}\n` +
+        `Follow cursor default: ${config.babysitFollowCursor ? 'on' : 'off'}\n` +
+        `Notes model: ${config.babysitNotesModel}\n` +
+        `Popup extension: ${config.babysitPromptExtensionEnabled ? 'enabled' : 'disabled'}\n` +
+        `Auto snapshot interval: ${config.babysitAutoSnapshotMs}ms`,
+        'Babysit Configuration'
+    );
+
     
     const webhookAction = await p.select({
         message: `${g.arrow} Platform connectors`,
@@ -817,100 +836,93 @@ async function handleSettings() {
     p.log.success(successTheme('Settings saved successfully.'));
 }
 
-async function showComprehensiveHelp(program) {
-    const g = glyphs();
+async function showComprehensiveHelp() {
     console.clear();
-    CFonts.say('COMMANDS', {
-        font: 'slim',
-        align: 'left',
-        colors: ['#00ffff', '#00ff00'],
-    });
-
-    console.log(renderPanel('Command Atlas', [
-        `${g.spark} ${pc.bold('Version')} ${pc.dim('v' + pkg.version)}   ${g.spark} ${pc.bold('Platform')} ${pc.dim(platformLabel)}`,
-        `${g.spark} ${pc.bold('Invocation')} ${pc.dim('rexai <command> [options]')}`
-    ]));
+    console.log('');
+    console.log(`  ${brandTheme('rex')}${pc.dim(' · commands')}`);
+    console.log(`  ${pc.dim(`v${pkg.version}  ·  ${platformLabel}`)}`);
+    console.log('');
+    console.log(sectionRule());
 
     const sections = [
         {
-            title: '🤖 Core AI Commands',
+            title: 'ai',
             commands: [
-                { cmd: 'rexai chat', desc: 'Main interactive agent loop (Sprint 1-3 features)' },
-                { cmd: 'rexai ask-ai <prompt>', desc: 'Direct one-off question to AI' },
-                { cmd: 'rexai x <cmd>', desc: 'Run shell command with AI self-healing' },
-                { cmd: 'rexai review', desc: 'Perform AI code review of current dir' },
-                { cmd: 'rexai sql', desc: 'Generate SQL from natural language' },
-                { cmd: 'rexai regex', desc: 'Generate RegEx patterns from description' }
+                { cmd: 'rexai chat', desc: 'Interactive agent loop' },
+                { cmd: 'rexai ask-ai <prompt>', desc: 'Direct question to AI' },
+                { cmd: 'rexai x <cmd>', desc: 'Shell command with self-healing' },
+                { cmd: 'rexai review', desc: 'AI code review' },
+                { cmd: 'rexai sql', desc: 'SQL from natural language' },
+                { cmd: 'rexai regex', desc: 'RegEx from description' }
             ]
         },
         {
-            title: '🏗️ Project & Dev Tools',
+            title: 'project',
             commands: [
-                { cmd: 'rexai health', desc: 'Scan project health, deps, and quality' },
-                { cmd: 'rexai doctor', desc: 'Secure diagnose, safe-fix, verify workflow' },
-                { cmd: 'rexai scaffold', desc: 'Quickly generate a single file/component' },
-                { cmd: 'rexai project-scaffold', desc: 'Generate a full project boilerplate' },
-                { cmd: 'rexai env', desc: 'Generate .env.example from .env' },
-                { cmd: 'rexai docs', desc: 'Generate aesthetic HTML documentation' },
-                { cmd: 'rexai slides', desc: 'Markdown notes → HTML slide deck' },
-                { cmd: 'rexai translate', desc: 'Translate source files between languages' }
+                { cmd: 'rexai health', desc: 'Project health scan' },
+                { cmd: 'rexai doctor', desc: 'Diagnose and safe-fix' },
+                { cmd: 'rexai scaffold', desc: 'Quick file scaffold' },
+                { cmd: 'rexai project-scaffold', desc: 'Full project boilerplate' },
+                { cmd: 'rexai env', desc: '.env.example from .env' },
+                { cmd: 'rexai docs', desc: 'HTML documentation' },
+                { cmd: 'rexai slides', desc: 'Markdown to slides' },
+                { cmd: 'rexai translate', desc: 'Translate source files' }
             ]
         },
         {
-            title: '📦 DevOps & Power Tools',
+            title: 'devops',
             commands: [
-                { cmd: 'rexai push', desc: 'Smart git stage, AI commit, and push' },
-                { cmd: 'rexai docker-push', desc: 'Build and push docker image' },
-                { cmd: CFonts.render('rexai deploy', {font:'console'}).string.trim(), desc: 'Cloud deployment assistant' },
-                { cmd: 'rexai share <port>', desc: 'Public tunnel for local port (vía share.js)' },
-                { cmd: 'rexai os-agent', desc: 'Isolated Windows OS-level automation mode' },
-                { cmd: 'rexai hook install', desc: 'Install AI-powered git commit hooks' },
-                { cmd: 'rexai plugins', desc: 'Browse and run community plugins' }
+                { cmd: 'rexai push', desc: 'Git stage, commit, push' },
+                { cmd: 'rexai docker-push', desc: 'Docker build and push' },
+                { cmd: 'rexai deploy', desc: 'Cloud deployment' },
+                { cmd: 'rexai share <port>', desc: 'Public tunnel for local port' },
+                { cmd: 'rexai os-agent', desc: 'Windows OS automation' },
+                { cmd: 'rexai hook install', desc: 'AI git commit hooks' },
+                { cmd: 'rexai plugins', desc: 'Community plugins' }
             ]
         },
         {
-            title: '💬 Chat Loop Slash Commands',
+            title: 'chat commands',
             commands: [
-                { cmd: '/save <name>', desc: 'Save current chat session to .agent/sessions/' },
-                { cmd: '/load <name>', desc: 'Reload a previous session' },
-                { cmd: '/history [q]', desc: 'Search or list session history' },
-                { cmd: '/workflow [w]', desc: 'Run multi-step YAML/JSON workflows' },
-                { cmd: '/profile [p]', desc: 'Switch config profiles (API keys, models)' },
-                { cmd: '/plan [args]', desc: 'Toggle planner mode and set max-step budget' },
-                { cmd: '/index', desc: 'Re-index project structure for AI' },
-                { cmd: '/help', desc: 'Show this internal command list' }
+                { cmd: '/save <name>', desc: 'Save session' },
+                { cmd: '/load <name>', desc: 'Reload session' },
+                { cmd: '/history [q]', desc: 'Search sessions' },
+                { cmd: '/workflow [w]', desc: 'Run workflows' },
+                { cmd: '/profile [p]', desc: 'Switch profiles' },
+                { cmd: '/plan [args]', desc: 'Planner controls' },
+                { cmd: '/index', desc: 'Re-index project' },
+                { cmd: '/help', desc: 'Help' }
             ]
         },
         {
-            title: '📎 Intelligence Shortcuts (Context Refs)',
+            title: 'context',
             commands: [
-                { cmd: '@file:path', desc: 'Inline inject file content into prompt' },
-                { cmd: '@url:link', desc: 'Inline fetch web content into prompt' },
-                { cmd: '| rexai chat', desc: 'Pipe terminal output into Rex logic' }
+                { cmd: '@file:path', desc: 'Inject file into prompt' },
+                { cmd: '@url:link', desc: 'Fetch web content into prompt' },
+                { cmd: '| rexai chat', desc: 'Pipe terminal output' }
             ]
         },
         {
-            title: '⚙️ Chat Flags (CLI Options)',
+            title: 'flags',
             commands: [
-                { cmd: '--debug', desc: 'Show full internal prompt & token costs' },
-                { cmd: '--readonly', desc: 'Block all write-related AI tools' },
-                { cmd: '--plan', desc: 'Use structured plan mode with subplans for errors' },
-                { cmd: '--plan-max-steps <n>', desc: 'Max autonomous plan steps before review (default 12)' },
-                { cmd: '--model <m>', desc: 'Override model per-session (fast/smart/best)' },
-                { cmd: '--attach <g>', desc: 'Auto-attach files matching glob to context' }
+                { cmd: '--debug', desc: 'Show prompt and token costs' },
+                { cmd: '--readonly', desc: 'Block write tools' },
+                { cmd: '--plan', desc: 'Structured plan mode' },
+                { cmd: '--plan-max-steps <n>', desc: 'Max autonomous steps (default 12)' },
+                { cmd: '--model <m>', desc: 'Override model per-session' },
+                { cmd: '--attach <g>', desc: 'Attach files by glob' }
             ]
         }
     ];
 
     for (const section of sections) {
-        console.log(`\n${accentTheme(section.title)}`);
-        console.log(divider(56));
+        console.log(`\n  ${pc.dim(section.title)}`);
         for (const item of section.commands) {
-            console.log(`  ${pc.cyan(item.cmd.padEnd(26))} ${pc.dim('|')} ${item.desc}`);
+            console.log(`    ${pc.cyan(item.cmd.padEnd(26))} ${pc.dim(item.desc)}`);
         }
     }
 
-    console.log(`\n${pc.bold(accentTheme('PRO TIP'))}: ${pc.dim('Use "rexai open" for the interactive dashboard.')}`);
+    console.log(`\n  ${pc.dim('tip: rexai open for interactive mode')}\n`);
 }
 
 main().catch((err) => {

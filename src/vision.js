@@ -43,28 +43,33 @@ export async function captureScreen() {
     }
 }
 
-export async function analyzeScreen() {
-    const screenshotPath = await captureScreen();
-    if (!screenshotPath) return;
+export async function analyzeScreen(imagePath = null) {
+    let targetPath = imagePath;
+    if (!targetPath) {
+        targetPath = await captureScreen();
+    }
+    if (!targetPath) return;
 
     const s = p.spinner();
-    s.start('Rex is looking at your screen...');
+    s.start('Rex is looking at the image...');
 
     try {
         // Since we can't easily send images to generic completion without specialized handlers
         // we'll describe it as a placeholder or use a vision-capable model if configured.
         // For now, let's assume Rex describes what he "sees" (simulated or via simple OCR if we add it)
         
-        const prompt = `(Note: You are RexAI. You just captured a screenshot of the user's desktop at ${screenshotPath}. 
-        Since you are a text-based AI in this CLI, please tell the user that you've seen their screen and ask what they want you to do with it. 
-        In a real scenario, you would analyze the pixels here.)`;
+        const prompt = `(Note: You are RexAI. You just received an image for analysis at ${targetPath}. 
+        Since you are a text-based AI in this CLI, please tell the user that you've received the image and are ready to convert it to HTML/CSS or perform analysis. 
+        In a real scenario with a Vision model integration, you would analyze the pixels here.)`;
         
         const res = await runCompletion(prompt, false);
         s.stop('Analysis complete.');
         p.note(res, 'Rex Vision');
+        return res;
     } catch (err) {
         s.stop(pc.red('Analysis failed.'));
         p.log.error(err.message);
+        return null;
     }
 }
 

@@ -1,5 +1,7 @@
 # Preflight Analyse Navigator Extension
 
+Version: 2.0.0
+
 This optional Chrome/Chromium extension improves agent navigation quality by:
 - adding stable `data-rex-nav-id` attributes to visible interactive elements
 - exposing metadata (`data-rex-nav-meta`) for better semantic targeting
@@ -9,6 +11,9 @@ This optional Chrome/Chromium extension improves agent navigation quality by:
 - tracking interaction mutation deltas after click/type actions
 - generating obstruction maps for overlay/z-index blocked targets
 - tagging form intents (email/password/search/address/etc.) from labels and aria
+- producing confidence-scored action lanes (`click`, `type`, `navigate`, `hover`) for safer target selection
+- maintaining temporal stability profiles so Rex can prefer durable elements over short-lived UI noise
+- publishing risk telemetry snapshots to extension storage for browser-session diagnostics
 
 ## Install (Chrome)
 1. Open `chrome://extensions`
@@ -35,6 +40,8 @@ Runtime objects exposed on pages for debugging/automation:
 - `window.__rexPreflightDelta`: snapshot-level added/removed/changed delta summary
 - `window.__rexPreflightInteractionDelta`: post-click/type mutation delta payload
 - `window.__rexPreflightObstructionMap`: list of currently blocked targets
+- `window.__rexPreflightIntelV2`: unified v2 intelligence packet (risk profile, top candidates, action lanes)
+- `window.__rexPreflightVersion`: extension intelligence version marker
 
 ## New Browser Actions for Better Navigation
 - `preflight_analyse`: health and readiness report (+ optional auto-heal)

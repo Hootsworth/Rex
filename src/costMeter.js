@@ -267,9 +267,15 @@ export function calculateCost(modelName, inputTokens, outputTokens) {
  * Session cost tracker — accumulates costs across a chat session
  */
 export class CostTracker {
-    constructor() {
+    constructor(sessionBudgetLimit = null) {
         this.totalCost = 0;
         this.callCount = 0;
+        this.sessionBudgetLimit = sessionBudgetLimit;
+    }
+
+    isBudgetExceeded() {
+        if (this.sessionBudgetLimit === null) return false;
+        return this.totalCost >= this.sessionBudgetLimit;
     }
 
     /**

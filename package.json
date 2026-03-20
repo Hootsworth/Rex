@@ -14,6 +14,7 @@
     "test": "npm run test:browser-regression",
     "test:browser-regression": "node tests/browser_regression_test.js",
     "test:browser-stress": "node tests/browser_stress_test.js",
+    "test:preflight-v2": "node tests/preflight_v2_test.js",
     "postinstall": "npx playwright install chromium"
   },
   "keywords": [],
@@ -24,6 +25,7 @@
     "@anthropic-ai/sdk": "^0.78.0",
     "@clack/prompts": "^1.1.0",
     "@google/generative-ai": "^0.24.1",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "cfonts": "^3.3.1",
     "cli-table3": "^0.6.5",
     "commander": "^14.0.3",
@@ -35,8 +37,11 @@
     "ollama": "^0.6.3",
     "openai": "^6.25.0",
     "picocolors": "^1.1.1",
+    "pixelmatch": "^7.1.0",
     "playwright": "^1.58.2",
+    "pngjs": "^7.0.0",
     "simple-git": "^3.32.3",
+    "uiohook-napi": "^1.5.4",
     "update-notifier": "^7.3.1"
   }
 }
