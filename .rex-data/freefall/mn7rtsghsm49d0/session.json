@@ -1,0 +1,9 @@
+{
+  "id": "mn7rtsghsm49d0",
+  "objective": "”Find bugs”",
+  "startedAt": "2026-03-26T17:53:26.609Z",
+  "intervalSeconds": 120,
+  "batchSize": 2,
+  "fileCount": 76,
+  "model": "gpt-5-nano"
+}

@@ -458,7 +458,8 @@ async function runInteractiveMenu() {
                 { value: 'project_tools',label: menuLabel('02', 'Project', 'health · scaffold · slides') },
                 { value: 'devops_tools', label: menuLabel('03', 'Ship',    'git · docker · deploy') },
                 { value: 'power_tools',  label: menuLabel('04', 'Ops',     'terminal · system · share') },
-                { value: 'settings',     label: menuLabel('05', 'Settings','models · permissions') },
+                { value: 'lab_tools',    label: menuLabel('05', 'Lab',     'cortex · swarm · fix') },
+                { value: 'settings',     label: menuLabel('06', 'Settings','models · permissions · logs') },
                 { value: 'exit',         label: menuLabel('00', 'Exit',    '', 'muted') }
             ]
         });
@@ -578,6 +579,50 @@ async function runInteractiveMenu() {
                         if (!p.isCancel(hAction)) { const { handleHooks } = await import('./hooks.js'); await handleHooks(hAction); }
                     }
                     if (powerAction === 'plugins') { const { runPlugins } = await import('./plugins.js'); await runPlugins(); }
+                    break;
+                }
+
+                case 'lab_tools': {
+                    console.log('');
+                    const labAction = await p.select({
+                        message: pc.dim('experimental'),
+                        options: [
+                            { value: 'nerve_map',  label: menuLabel('ctx', 'Nerve Map (CortexKit)') },
+                            { value: 'hindsight',  label: menuLabel('hst', 'Hindsight Explorer') },
+                            { value: 'auto_fix',   label: menuLabel('fix', 'Auto-Fix (Self-Healing)') },
+                            { value: 'swarm',      label: menuLabel('swm', 'Swarm Delegation') },
+                            { value: 'mcp',        label: menuLabel('mcp', 'Productivity Suite (MCP)') },
+                            { value: 'sentinel',   label: menuLabel('srv', 'Start Sentinel Server (Webhooks)') },
+                            { value: 'discord',    label: menuLabel('bot', 'Start Discord Bot Companion') },
+                            { value: 'back',       label: pc.dim('  back') }
+                        ]
+                    });
+                    if (p.isCancel(labAction) || labAction === 'back') break;
+                    
+                    if (labAction === 'nerve_map') { const { nerve_map } = await import('./cortexKit.js'); const res = await nerve_map({ directory: process.cwd() }); p.note(res, 'CortexKit'); }
+                    if (labAction === 'mcp') { const { mcpMenu } = await import('./mcpManager.js'); await mcpMenu(); }
+                    if (labAction === 'sentinel') { 
+                        const { startProductionVisionServer } = await import('./server.js'); 
+                        await startProductionVisionServer(); 
+                        p.note(pc.green('Production Vision Sentinel is running in the background.'), 'Sentinel Server');
+                    }
+                    if (labAction === 'discord') {
+                        const { startDiscordBot } = await import('./discordBot.js');
+                        await startDiscordBot();
+                    }
+                    if (labAction === 'hindsight') { 
+                        const dir = path.join(process.cwd(), '.agent', 'hindsight');
+                        if (!fs.existsSync(dir)) { p.log.warn('No hindsight records found.'); break; }
+                        const files = fs.readdirSync(dir).filter(f => f.endsWith('.md'));
+                        if (!files.length) { p.log.warn('No hindsight records found.'); break; }
+                        const file = await p.select({ message: 'Select record:', options: files.map(f => ({ value: f, label: f })) });
+                        if (!p.isCancel(file)) p.note(fs.readFileSync(path.join(dir, file), 'utf-8'), 'Hindsight');
+                    }
+                    if (labAction === 'auto_fix') { const { autoFixProject } = await import('./fix.js'); await autoFixProject(); }
+                    if (labAction === 'swarm') { 
+                        const task = await p.text({ message: 'Task for sub-agent:', placeholder: 'Research the latest version of React' });
+                        if (!p.isCancel(task)) { const { delegate_task } = await import('./swarm.js'); const res = await delegate_task({ task }); p.note(res, 'Swarm Result'); }
+                    }
                     break;
                 }
 
@@ -798,11 +843,37 @@ async function handleSettings() {
         message: `${g.arrow} Babysit auto snapshot interval (ms)`,
         initialValue: String(config.babysitAutoSnapshotMs || 18000)
     });
-    if (p.isCancel(babysitAutoSnapshotMs)) return;
-    {
-        const parsed = Number.parseInt(String(babysitAutoSnapshotMs), 10);
-        config.babysitAutoSnapshotMs = Number.isFinite(parsed) && parsed >= 8000 ? parsed : 18000;
-    }
+    if (!p.isCancel(babysitAutoSnapshotMs)) config.babysitAutoSnapshotMs = Number(babysitAutoSnapshotMs);
+
+    const voiceMode = await p.confirm({
+        message: `${g.arrow} Enable Voice Mode (Rex speaks responses aloud using high-quality AI voice)?`,
+        initialValue: Boolean(config.voiceEnabled)
+    });
+    if (p.isCancel(voiceMode)) return;
+    config.voiceEnabled = Boolean(voiceMode);
+
+    const showInternalLogs = await p.confirm({
+        message: `${g.arrow} Show internal tool logs (detailed reasoning)?`,
+        initialValue: Boolean(config.showInternalToolLogs)
+    });
+    if (!p.isCancel(showInternalLogs)) config.showInternalToolLogs = Boolean(showInternalLogs);
+
+    const budgetMode = await p.select({
+        message: `${g.arrow} Web Agent budget mode`,
+        options: [
+            { value: 'low', label: 'Low (Cheaper, potential errors)' },
+            { value: 'balanced', label: 'Balanced (Standard)' },
+            { value: 'max-quality', label: 'Max Quality (Heavy token usage)' }
+        ],
+        initialValue: config.webAgentBudgetMode || 'balanced'
+    });
+    if (!p.isCancel(budgetMode)) config.webAgentBudgetMode = budgetMode;
+
+    const progressLogs = await p.confirm({
+        message: `${g.arrow} Show Auto-Pilot progress logs?`,
+        initialValue: Boolean(config.showAutoPilotProgressLogs)
+    });
+    if (!p.isCancel(progressLogs)) config.showAutoPilotProgressLogs = Boolean(progressLogs);
 
     p.note(
         `Babysit: ${config.babysitModeEnabled ? 'enabled' : 'disabled'}\n` +

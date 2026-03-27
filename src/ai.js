@@ -163,10 +163,36 @@ export async function runCompletion(messages, signal = null, complexity = 'high'
             : 'gemini-2.5-flash';
         const model = genAI.getGenerativeModel({ model: selectedGeminiModel });
         
-        const combinedPrompt = formattedMessages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
+        let systemInstruction = undefined;
+        const chatContents = [];
         
+        for (const m of formattedMessages) {
+            if (m.role === 'system') {
+                systemInstruction = { role: 'system', parts: [{ text: m.content }] };
+                continue;
+            }
+            let parts = [];
+            if (typeof m.content === 'string') {
+                parts = [{ text: m.content }];
+            } else if (Array.isArray(m.content)) {
+                parts = m.content.map(p => {
+                    if (p.type === 'text') return { text: p.text };
+                    if (p.type === 'image_url') {
+                        const match = p.image_url.url.match(/^data:(image\/\w+);base64,(.+)$/);
+                        if (match) return { inlineData: { data: match[2], mimeType: match[1] } };
+                        return { text: `[Image unrenderable by Gemini: ${p.image_url.url}]` };
+                    }
+                    return { text: '' };
+                });
+            }
+            chatContents.push({ role: m.role === 'assistant' ? 'model' : 'user', parts });
+        }
+        
+        const reqObj = { contents: chatContents };
+        if (systemInstruction) reqObj.systemInstruction = systemInstruction;
+
         // Wrap in abort-aware promise
-        const resultPromise = model.generateContent(combinedPrompt);
+        const resultPromise = model.generateContent(reqObj);
         const abortPromise = signal ? new Promise((_, reject) => {
             signal.addEventListener('abort', () => reject(new Error('Aborted')), { once: true });
         }) : null;
@@ -314,6 +340,32 @@ export async function runCompletionWithTarget(messages, target = {}, signal = nu
 
         const result = abortPromise ? await Promise.race([resultPromise, abortPromise]) : await resultPromise;
         return result.response.text();
+    }
+
+    if (provider === 'claude') {
+        if (!config.claudeKey) throw new Error('Claude key is missing! Please configure it in Settings.');
+        const anthropic = new Anthropic({ apiKey: config.claudeKey });
+
+        const systemMessage = formattedMessages.find(m => m.role === 'system')?.content || '';
+        const chatMessages = formattedMessages.filter(m => m.role !== 'system');
+
+        const msg = await anthropic.messages.create({
+            model,
+            max_tokens: 4096,
+            system: systemMessage,
+            messages: chatMessages
+        }, { abortSignal: signal });
+        return msg.content[0].text;
+    }
+
+    if (provider === 'deepseek') {
+        if (!config.deepseekKey) throw new Error('Deepseek key is missing! Please configure it in Settings.');
+        const deepseek = new OpenAI({ baseURL: 'https://api.deepseek.com', apiKey: config.deepseekKey });
+        const response = await deepseek.chat.completions.create({
+            model,
+            messages: formattedMessages,
+        }, { signal });
+        return response.choices[0].message.content;
     }
 
     // Unsupported target provider: fall back to default routing.

@@ -42,7 +42,20 @@ const DEFAULT_CONFIG = {
   smtpPort: 587,
   smtpUser: '',
   smtpPass: '',
-  mcpServers: {}
+  mcpServers: {},
+  tenorApiKey: '',
+  giphyApiKey: '',
+  discordBotToken: '',
+  discordIntentPipelineEnabled: true,
+  intentProvider: '',
+  intentOllamaModel: 'llama3:latest',
+  discordAllowedUserIds: [],
+  allowedDirs: [
+    path.join(os.homedir(), 'Desktop'),
+    path.join(os.homedir(), 'Downloads')
+  ],
+  voiceTranscriptionMode: 'openai',
+  whisperServiceUrl: ''
 };
 
 // Model aliases for quick switching

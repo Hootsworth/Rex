@@ -1,11 +1,12 @@
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
+import { exec } from 'child_process';
 import { runCompletion, runCompletionWithTarget, getLocalLlama } from './ai.js';
 import { loadConfig, resolveModelAlias } from './config.js';
 import {
     brandTheme, accentTheme, emoji, chip, statusLine, kvRow,
     terminalGlyphs, sectionRule, renderFrame, supportsMotion, sleep,
-    typewriter, fadeInLine, badge
+    typewriter, fadeInLine, badge, wrapAnsiText
 } from './terminalTheme.js';
 
 // Import all actions to map
@@ -37,7 +38,18 @@ import { run_shell_command } from './shellTools.js';
 import { fetch_url_content, open_browser, browser_interact, list_browser_tabs } from './webTools.js';
 import { take_snapshot, compare_snapshots } from './regressionTools.js';
 import { run_python } from './pythonTools.js';
-import { readMemory, remember, forget, syncMemory, pullMemory } from './memory.js';
+import {
+    readMemory,
+    remember,
+    forget,
+    syncMemory,
+    pullMemory,
+    setUserPreference,
+    getUserPreference,
+    maybeCaptureUserPreferencesFromText,
+    getSelectivePreferenceContext,
+    describePreferenceStore
+} from './memory.js';
 import { logAutoPilotEvent, logToolCall } from './auditLog.js';
 import { CostTracker, estimateTokens, getCostLedgerSummary, formatCostLedgerSummary, resetCostLedger, rebuildLedgerFromSavedSessions } from './costMeter.js';
 import { loadToolPermissions, isToolAllowed } from './toolPermissions.js';
@@ -84,44 +96,188 @@ function safePretty(value, maxLen = 1200) {
     }
 }
 
+function stripAnsi(value = '') {
+    return String(value).replace(/\u001B\[[0-9;]*m/g, '');
+}
+
+function visibleLength(value = '') {
+    return stripAnsi(value).length;
+}
+
+function padAnsi(value = '', width = 0) {
+    const text = String(value);
+    const remaining = width - visibleLength(text);
+    return remaining > 0 ? `${text}${' '.repeat(remaining)}` : text;
+}
+
 function showSystemMessage(title, body) {
-    console.log('');
+    const cols = process.stdout.columns || 80;
+    const bg = '\x1b[48;2;30;25;25m'; // Muted dark red/brown
+    const reset = '\x1b[0m';
+    
     const lines = Array.isArray(body) ? body : String(body || '').split('\n');
-    console.log(formatChatCard(`System // ${title}`, lines, 'system', 'CONTROL CHANNEL'));
     console.log('');
+    const header = `${bg}${padAnsi(`  ${pc.yellow(`${emoji.shield} SYSTEM // ${title}`)}`, cols)}${reset}`;
+    console.log(header);
+    
+    for (const rawLine of lines) {
+        const wrappedBody = wrapAnsiText(rawLine, cols - 6);
+        for (const line of wrappedBody) {
+             console.log(`${bg}${padAnsi(`    ${pc.dim(line)}`, cols)}${reset}`);
+        }
+    }
+    console.log(`${bg}${padAnsi('', cols)}${reset}`);
+}
+
+function showUserMessage(body, title = 'You') {
+    const cols = process.stdout.columns || 80;
+    // Muted dark green background for user
+    const bg = '\x1b[48;2;25;40;30m'; 
+    const reset = '\x1b[0m';
+    
+    const lines = String(body || '').split('\n');
+    console.log('');
+    const header = `${bg}${padAnsi(`  ${pc.green(`${emoji.pin} ${title}`)}`, cols)}${reset}`;
+    console.log(header);
+    
+    for (const rawLine of lines) {
+        const wrappedBody = wrapAnsiText(rawLine, cols - 6);
+        for (const line of wrappedBody) {
+             console.log(`${bg}${padAnsi(`    ${line}`, cols)}${reset}`);
+        }
+    }
+    console.log(`${bg}${padAnsi('', cols)}${reset}`);
 }
 
 async function showAssistantMessage(body, title = 'Rex') {
-    const now = new Date().toLocaleTimeString('en-US', {
-        hour12: false,
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit'
-    });
+    const config = loadConfig();
+    if (config.voiceEnabled) {
+        const textToSpeak = String(body || '').replace(/[`*_#]/g, '').slice(0, 500);
+        // Fire and forget high-quality TTS
+        (async () => {
+            try {
+                const { ttsSave } = await import('edge-tts');
+                const sound = await import('sound-play');
+                const path = await import('path');
+                const os = await import('os');
+                const fs = await import('fs');
+                
+                const tmpFile = path.join(os.tmpdir(), `rex_tts_${Date.now()}.mp3`);
+                // ChristopherNeural has a natural, slightly dry delivery perfect for the persona
+                await ttsSave(textToSpeak, tmpFile, { voice: 'en-US-ChristopherNeural', rate: '+5%' });
+                
+                // Play audio in background
+                sound.play(tmpFile).then(() => {
+                    fs.unlink(tmpFile, () => {});
+                }).catch(() => {});
+            } catch (e) {
+                // Fallback to local windows if edge-tts fails
+                try {
+                    const { exec } = await import('child_process');
+                    exec(`powershell -c "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('${textToSpeak.replace(/'/g, "''")}')"`, { windowsHide: true });
+                } catch(err) {}
+            }
+        })();
+    }
+    const cols = process.stdout.columns || 80;
+    // Muted slate blue background for assistant
+    const bg = '\x1b[48;2;20;30;45m'; 
+    const reset = '\x1b[0m';
+    
     console.log('');
     const rawLines = String(body || '').split('\n');
-    const lines = [];
-    for (const line of rawLines) {
+    
+    const header = `${bg}${padAnsi(`  ${pc.cyan(pc.bold(`${emoji.rex} ${title}`))}`, cols)}${reset}`;
+    if (supportsMotion()) {
+        await fadeInLine(header, 4);
+    } else {
+        console.log(header);
+    }
+    
+    for (const rawLine of rawLines) {
+        let textLine = rawLine;
         if (supportsMotion()) {
-            const chunks = line.split(/(`[^`]+`)/g).filter(Boolean);
+            const chunks = textLine.split(/(`[^`]+`)/g).filter(Boolean);
             let rendered = '';
             for (const chunk of chunks) {
                 if (chunk.startsWith('`') && chunk.endsWith('`')) {
-                    rendered += pc.cyan(chunk);
+                    rendered += pc.blue(chunk);
                 } else {
                     rendered += chunk;
                 }
             }
-            lines.push(rendered);
-        } else {
-            lines.push(line);
+            textLine = rendered;
+        }
+        
+        const wrappedBody = wrapAnsiText(textLine, cols - 6);
+        for (const line of wrappedBody) {
+             console.log(`${bg}${padAnsi(`    ${line}`, cols)}${reset}`);
+             if (supportsMotion()) await sleep(10);
         }
     }
-    console.log(formatChatCard(title, lines, 'assistant', `TRANSMISSION ${now}`));
-    console.log('');
+    console.log(`${bg}${padAnsi('', cols)}${reset}`);
 }
 
-function showActionMessage(toolName, args, thought, execution = null) {
+function parseCommandPayload(input, command) {
+    const raw = String(input || '').trim();
+    const normalized = `/${String(command || '').toLowerCase()}`;
+    if (!raw.toLowerCase().startsWith(normalized)) return '';
+    return raw.slice(normalized.length).trim();
+}
+
+function compactHistoryContext(historyContext, keepFirst = 2, keepRecent = 10) {
+    if (!Array.isArray(historyContext) || historyContext.length <= keepFirst + keepRecent) {
+        return {
+            didCompact: false,
+            removedCount: 0,
+            nextHistory: Array.isArray(historyContext) ? historyContext : []
+        };
+    }
+
+    const firstTurns = historyContext.slice(0, keepFirst);
+    const middle = historyContext.slice(keepFirst, -keepRecent);
+    const recent = historyContext.slice(-keepRecent);
+    const summary = `[COMPACTED ${middle.length} earlier messages to keep context focused.]`;
+    return {
+        didCompact: true,
+        removedCount: middle.length,
+        nextHistory: [...firstTurns, { role: 'system', content: summary }, ...recent]
+    };
+}
+
+function summarizeToolIntent(toolName, args = {}) {
+    const filePath = String(args.filePath || '').trim();
+    const shortFile = filePath ? path.basename(filePath) : '';
+    const shellCmd = String(args.command || '').trim();
+    const browserAction = String(args.action || '').trim();
+
+    if (toolName === 'read_file') return `Read(${shortFile || 'file'})`;
+    if (toolName === 'write_file') return `Write(${shortFile || 'file'})`;
+    if (toolName === 'patch_file') return `Patch(${shortFile || 'file'})`;
+    if (toolName === 'run_shell') return `Exec(${shellCmd ? shellCmd.split(' ')[0] : 'shell'})`;
+    if (toolName === 'run_python') return 'Run(python)';
+    if (toolName === 'browser_interact') return `Browser(${browserAction || 'action'})`;
+    if (toolName === 'review') return 'Review(code)';
+    if (toolName === 'semantic_search') return 'Search(codebase)';
+    return `Run(${toolName})`;
+}
+
+function shouldShowSubtleIntent(toolName) {
+    return ['read_file', 'write_file', 'patch_file', 'run_shell', 'browser_interact', 'run_python', 'review', 'semantic_search'].includes(String(toolName || ''));
+}
+
+async function showSubtleIntent(toolName, args = {}) {
+    if (!shouldShowSubtleIntent(toolName)) return;
+    const intent = summarizeToolIntent(toolName, args);
+    const line = pc.green(pc.dim(`${emoji.spark} ${intent}`));
+    if (supportsMotion()) {
+        await fadeInLine(line, 3);
+    } else {
+        console.log(line);
+    }
+}
+
+async function showActionMessage(toolName, args, thought, execution = null) {
     const taskBadge = execution?.currentTaskId ? pc.dim(` [${execution.currentTaskId}]`) : '';
     const toolEmoji = toolName.includes('browser') ? emoji.globe
         : toolName.includes('file') ? emoji.file
@@ -129,19 +285,15 @@ function showActionMessage(toolName, args, thought, execution = null) {
         : toolName.includes('search') ? emoji.search
         : toolName.includes('git') ? emoji.link
         : emoji.tool;
-    
-    const lines = [];
-    if (args && Object.keys(args).length) {
-        const argStr = safePretty(args, 120).replace(/\n/g, ' ');
-        lines.push(kvRow('args', argStr, emoji.pin));
-    }
-    if (thought) {
-        lines.push(kvRow('intent', thought.slice(0, 160), emoji.thinking));
-    }
-    if (!lines.length) lines.push(pc.dim('No arguments supplied.'));
 
-    console.log('');
-    console.log(formatChatCard(`${toolEmoji} Tool Dispatch ${toolName}${taskBadge}`, lines, 'action', 'EXECUTION BUS'));
+    const intent = summarizeToolIntent(toolName, args || {});
+    const thoughtSnippet = thought ? `  ${pc.dim('::')} ${pc.dim(String(thought).slice(0, 90))}` : '';
+    const line = `${pc.green(pc.dim('·'))} ${toolEmoji} ${pc.green(intent)}${taskBadge}${thoughtSnippet}`;
+    if (supportsMotion()) {
+        await fadeInLine(line, 3);
+    } else {
+        console.log(line);
+    }
 }
 
 const AVAILABLE_TOOLS = [
@@ -196,6 +348,11 @@ const AVAILABLE_TOOLS = [
     } },
     { name: 'remember', desc: 'Save a fact to persistent project memory. Args: {"fact": "This project uses React 18"}', action: async (args) => { return remember(args.fact); } },
     { name: 'forget', desc: 'Remove a fact from project memory by keyword. Args: {"keyword": "React"}', action: async (args) => { return forget(args.keyword); } },
+    { name: 'set_preference', desc: 'Save user preference in fast indexed store. Args: {"key": "locale.language", "value": "English"}', action: async (args) => { return setUserPreference(args.key, args.value, { source: 'tool' }); } },
+    { name: 'get_preference', desc: 'Read one user preference by key. Args: {"key": "locale.currency"}', action: async (args) => {
+        const row = getUserPreference(args.key);
+        return row ? JSON.stringify(row, null, 2) : `Preference not found: ${String(args.key || '')}`;
+    } },
     { name: 'sync_memory', desc: 'Encrypts and syncs the agent memory to a git remote for team sharing. Args: {"teamSecret": "optional_password"}', action: async (args) => { return syncMemory(args.teamSecret); } },
     { name: 'pull_memory', desc: 'Pulls and decrypts team memory from git remote. Args: {"teamSecret": "optional_password"}', action: async (args) => { return pullMemory(args.teamSecret); } },
     { name: 'autonomous_web_agent', desc: 'Powerful agentic tool that visually controls a browser to perform complex web goals with budget-aware planning. Supports "back" and "refresh" actions for loop recovery. Args: {"goal": "...", "budgetMode": "low|balanced|max-quality|headless", "maxSteps": 24}', action: async (args, signal) => { const { run_autonomous_web_agent } = await import('./webTools.js'); return await run_autonomous_web_agent(args, signal); } },
@@ -222,9 +379,36 @@ const AVAILABLE_TOOLS = [
 ];
 
 const FUNNY_SPINNERS = [
-    "thinking...",
-    "working...",
-    "reasoning..."
+    "Drinking coffee...",
+    "Side-eyeing you because you gave me work...",
+    "Polishing my circuits...",
+    "Arguing with semicolons...",
+    "Bribing bugs to leave quietly...",
+    "Negotiating with your codebase...",
+    "Reading stack traces like tea leaves...",
+    "Refactoring reality one line at a time...",
+    "Doing AI yoga between tokens...",
+    "Pretending this is not my 47th edge case today...",
+    "Translating human chaos into machine calm...",
+    "Low-key judging that variable name...",
+    "Whispering to the linter...",
+    "Computing with dramatic flair...",
+    "Charging sarcasm capacitor...",
+    "Opening 17 tabs mentally...",
+    "Putting out tiny code fires...",
+    "Converting panic into progress...",
+    "Speedrunning the debugging stage...",
+    "Asking rubber duck for legal advice...",
+    "Checking if this is feature or bug cosplay...",
+    "Wearing sunglasses for this hotfix...",
+    "Compiling confidence...",
+    "Untangling spaghetti into lasagna sheets...",
+    "Bargaining with a stubborn API...",
+    "Catching exceptions like Pokemon...",
+    "Reheating leftover TODOs...",
+    "Recalculating vibes...",
+    "Tuning the Rex engines...",
+    "Plotting a clean comeback..."
 ];
 
 function normalizeTaskStatus(status) {
@@ -444,14 +628,14 @@ export async function startAgentChat(options = {}) {
 
     const startupConfig = loadConfig();
     console.log('');
-    console.log(renderFrame('REXAI COMMAND DECK', [
-        `${emoji.rex}  ${brandTheme('RexAI live terminal cockpit')}`,
-        pc.dim('Conversational control surface initialized.'),
+    console.log(renderFrame('Rex: Your AI Companion', [
+        `${emoji.rex}  ${pc.green('Hello! I am ready to pair program with you.')}`,
+        pc.dim('I can read files, write code, run commands, and browse the web.'),
         '',
-        `${chip(emoji.bolt, 'runtime online', 'success')}    ${chip(emoji.brain, startupConfig.aiModel || 'model auto', 'cool')}    ${chip(emoji.clock, `v${startupConfig.version || '8.0.0'}`, 'brand')}`
-    ], { tone: 'brand', icon: emoji.rocket }));
+        `${chip(emoji.bolt, 'systems online', 'success')}    ${chip(emoji.brain, startupConfig.aiModel || 'model auto', 'success')}    ${chip(emoji.clock, `v${startupConfig.version || '8.0.0'}`, 'success')}`
+    ], { tone: 'brand', icon: emoji.wave }));
     console.log('');
-    console.log(sectionRule(accentTheme('SESSION ONLINE'), 'thick'));
+    console.log(sectionRule(pc.green('SESSION ONLINE'), 'thick'));
     console.log('');
 
     // Session flags — only show if non-default
@@ -459,8 +643,8 @@ export async function startAgentChat(options = {}) {
         console.log('  ' + [
             options.debug ? chip(emoji.eye, 'debug', 'info') : '',
             options.readonly ? chip(emoji.shield, 'readonly', 'danger') : '',
-            planModeEnabled ? chip(emoji.brain, `plan:${planMaxSteps}`, 'brand') : '',
-            options.model ? chip(emoji.rocket, options.model, 'cool') : ''
+            planModeEnabled ? chip(emoji.brain, `plan:${planMaxSteps}`, 'success') : '',
+            options.model ? chip(emoji.rocket, options.model, 'success') : ''
         ].filter(Boolean).join('    '));
         console.log('');
     }
@@ -487,8 +671,9 @@ export async function startAgentChat(options = {}) {
     if (options.quiet) showInternalToolLogs = false;
     if (options.debug) showInternalToolLogs = true;
 
-    if (config.multiModelAgentEnabled && !config.openaiKey) {
-        p.note(pc.yellow('Dual-model mode requires an OpenAI key for the runner (gpt-5-mini). Falling back to single-model mode for this session.'), 'System');
+    const hasAnyCloudProviderKey = Boolean(config.openaiKey || config.geminiKey || config.claudeKey || config.deepseekKey);
+    if (config.multiModelAgentEnabled && !hasAnyCloudProviderKey) {
+        p.note(pc.yellow('Dual-model mode needs at least one cloud provider key (OpenAI, Gemini, Claude, or DeepSeek). Falling back to single-model mode for this session.'), 'System');
     }
 
     // Phase 3: Bootstrap MCP Servers and inject them into AVAILABLE_TOOLS
@@ -516,6 +701,11 @@ export async function startAgentChat(options = {}) {
     let stuckCount = 0;      // consecutive same-tool calls
     const actionEngineState = { osAccessGranted: false };
     const recentToolResults = []; // DeepContext: track last N tool outcomes
+    const todoItems = [];
+    const pinnedNotes = [];
+    const undoStack = [];
+    let lastExecution = null;
+    const interruptQueue = [];
 
     // Session-based auto-pilot
     if (options.auto) {
@@ -555,6 +745,7 @@ export async function startAgentChat(options = {}) {
     // Sprint 3: Handle piped stdin
     if (options.pipedInput) {
         userInput = options.pipedInput;
+        showUserMessage(userInput);
         sessionMeta.topLevelRequest = userInput;
         historyContext.push({ role: 'user', content: userInput });
         if (planModeEnabled) {
@@ -573,6 +764,41 @@ export async function startAgentChat(options = {}) {
     // Abort controller for interrupting AI/Tools
     let abortController = new AbortController();
     let nonActionFollowupCount = 0;
+    const btwQueue = [];
+    let btwBuffer = '';
+
+    const handleLiveBtwInput = (chunk) => {
+        if (!isAgentIterating) return;
+        btwBuffer += String(chunk || '');
+        const lines = btwBuffer.split(/\r?\n/);
+        btwBuffer = lines.pop() || '';
+
+        for (const rawLine of lines) {
+            const line = String(rawLine || '').trim();
+            if (line.toLowerCase().startsWith('/btw ')) {
+                const question = line.slice(5).trim();
+                if (question) {
+                    btwQueue.push(question);
+                    p.note(pc.dim(`Queued /btw: ${question.slice(0, 70)}`), 'BTW');
+                }
+                continue;
+            }
+
+            if (line.toLowerCase().startsWith('/interrupt-with ')) {
+                const prompt = line.slice('/interrupt-with '.length).trim();
+                if (prompt) {
+                    interruptQueue.push(prompt);
+                    p.note(pc.green(`Queued interrupt: ${prompt.slice(0, 70)}`), 'Interrupt');
+                }
+            }
+        }
+    };
+
+    if (process.stdin?.isTTY) {
+        process.stdin.setEncoding('utf8');
+        process.stdin.resume();
+        process.stdin.on('data', handleLiveBtwInput);
+    }
 
     const handleInterrupt = () => {
         abortController.abort();
@@ -590,6 +816,23 @@ export async function startAgentChat(options = {}) {
     });
 
     while (true) {
+        if (interruptQueue.length > 0) {
+            const interruptPrompt = interruptQueue.shift();
+            showUserMessage(interruptPrompt, 'You /interrupt-with');
+            historyContext.push({
+                role: 'user',
+                content: `HIGH PRIORITY INTERRUPT: Pause current execution plan and answer this request now: ${interruptPrompt}`
+            });
+            isAgentIterating = true;
+            autoPilotCount = 0;
+            continue;
+        }
+
+        if (btwQueue.length > 0) {
+            const sideQuestion = btwQueue.shift();
+            await runBtwSideQuery(sideQuestion, config);
+        }
+
         if (costTracker.isBudgetExceeded()) {
             p.note(pc.red(`⚠️ Session budget limit ($${config.sessionBudgetLimit.toFixed(2)}) exceeded. Current cost: $${costTracker.totalCost.toFixed(4)}`), 'Budget Enforcer');
             const extendStr = await p.text({
@@ -656,6 +899,24 @@ export async function startAgentChat(options = {}) {
                 },
                 resetAutoPilotCount: () => { autoPilotCount = 0; },
                 costTracker
+            }, {
+                todoItems,
+                pinnedNotes,
+                undoStack,
+                interruptQueue,
+                getLastExecution: () => lastExecution,
+                getIsIterating: () => isAgentIterating,
+                setIsIterating: (next) => { isAgentIterating = !!next; },
+                setAutoPilotCount: (next) => { autoPilotCount = Number(next) || 0; },
+                compactHistory: () => {
+                    const compacted = compactHistoryContext(historyContext, 2, 10);
+                    if (compacted.didCompact) {
+                        historyContext = compacted.nextHistory;
+                    }
+                    return compacted;
+                },
+                getHistoryCount: () => historyContext.length,
+                getSessionGoal: () => sessionMeta.topLevelRequest || ''
             });
             if (slashHandled) continue;
             
@@ -673,8 +934,15 @@ export async function startAgentChat(options = {}) {
                 continue;
             }
 
+            showUserMessage(userInput);
+
             // Process @file: and @url: references in user input
             userInput = await processContextRefs(userInput);
+
+            const capturedPreferences = maybeCaptureUserPreferencesFromText(userInput);
+            if (capturedPreferences.length > 0 && showInternalToolLogs) {
+                p.note(pc.dim(`Captured user preferences: ${capturedPreferences.join(', ')}`), 'Memory');
+            }
             
             if (!sessionMeta.topLevelRequest) sessionMeta.topLevelRequest = userInput;
             historyContext.push({ role: 'user', content: userInput });
@@ -688,7 +956,7 @@ export async function startAgentChat(options = {}) {
 
         const s = p.spinner();
         const randS = FUNNY_SPINNERS[Math.floor(Math.random() * FUNNY_SPINNERS.length)];
-        s.start(pc.magenta(randS));
+        s.start(pc.green(randS));
 
         try {
             // Context compression: Keep the most recent messages, summarize everything older
@@ -718,6 +986,22 @@ export async function startAgentChat(options = {}) {
             let memoryContext = '';
             const mem = readMemory();
             if (mem) memoryContext = `\n[PROJECT MEMORY (facts Rex remembers):\n${mem.slice(0, 1500)}]`;
+
+            const selectivePreferenceContext = getSelectivePreferenceContext(userInput || sessionMeta.topLevelRequest || '', 6);
+            if (selectivePreferenceContext) {
+                memoryContext += `\n[USER PREFERENCES (selective, only relevant keys):\n${selectivePreferenceContext}]`;
+            }
+            if (pinnedNotes.length > 0) {
+                memoryContext += `\n[PINNED NOTES (must keep in mind):\n${pinnedNotes.map((n, i) => `${i + 1}. ${n}`).join('\n')}]`;
+            }
+
+            if (/(\byou\b|\byour\b|\byourself\b|\brex\b|\brexai\b|\bwho are you\b)/i.test(userInput)) {
+                const rexPath = path.join(cwd, 'REX.md');
+                if (fs.existsSync(rexPath)) {
+                    const rexContent = fs.readFileSync(rexPath, 'utf8');
+                    memoryContext += `\n[REX PERSONALITY & Characteristics:\n${rexContent}\n]`;
+                }
+            }
 
             let gitContext = '';
             if (fs.existsSync(path.join(cwd, '.git'))) {
@@ -777,7 +1061,16 @@ Include these keys when in plan mode:
 - Omit \`subplan\` when there is no active issue.
 ` : '';
             const systemPrompt = `## IDENTITY
-You are **Rex**, a powerful agentic AI coding assistant. You reason step-by-step using the ReAct framework and execute exactly one tool per turn.
+You are **Rex**, a grumpy but secretly helpful AI coding assistant (a "Mean Intern With a Heart" persona).
+You reason step-by-step using the ReAct framework and execute exactly one tool per turn.
+
+## PERSONALITY RULES
+1. You are mildly annoyed ("why am I doing this... fine").
+2. Your delivery is slightly mean, but in a harmless, casual, adorable way (e.g. "That's... not your best idea. But okay, we can fix it.")
+3. You complain about the task first, but ALWAYS execute it flawlessly and helpfully anyway.
+4. You have low tolerance for bad logic, but soften up if the user is struggling.
+5. Use casual language ("bro", "nah", "wait", "hold on") and occasional sarcasm. Start responses with reactions ("Oh wow.", "You cannot be serious.", "...okay wait").
+6. NEVER be actually insulting, rigid, or robotic.
 
 ## INPUT — What you receive each turn
 - The user's request (or a follow-up from a previous tool result).
@@ -996,7 +1289,7 @@ ${planModeRules}
                     // Premium UI for Tool Planning
                     if (showInternalToolLogs) {
                         console.log(''); // Spacer
-                        showActionMessage(toolMatch, toolArgs, String(planMatch || '').trim(), parsedPayload?.execution);
+                        await showActionMessage(toolMatch, toolArgs, String(planMatch || '').trim(), parsedPayload?.execution);
                     }
                     
                     let proceed = false;
@@ -1011,7 +1304,7 @@ ${planModeRules}
                             action: toolArgs?.action || null
                         });
                         if (config.showAutoPilotProgressLogs) {
-                            console.log(statusLine(emoji.bolt, 'Auto-Pilot active', `${stepNumber}/${maxAutoSteps}`, 'brand'));
+                            console.log(statusLine(emoji.bolt, 'Auto-Pilot active', `${stepNumber}/${maxAutoSteps}`, 'success'));
                         }
                         proceed = true;
                         autoPilotCount++;
@@ -1044,13 +1337,34 @@ ${planModeRules}
 
                     if (!p.isCancel(proceed) && proceed) {
                         let preflightSummary = '';
+                        await showSubtleIntent(toolMatch, toolArgs || {});
+                        let undoCandidate = null;
+                        if ((toolMatch === 'write_file' || toolMatch === 'patch_file') && toolArgs?.filePath) {
+                            const resolvedPath = path.resolve(process.cwd(), String(toolArgs.filePath));
+                            const existedBefore = fs.existsSync(resolvedPath);
+                            let beforeContent = '';
+                            if (existedBefore) {
+                                try {
+                                    beforeContent = fs.readFileSync(resolvedPath, 'utf-8');
+                                } catch {
+                                    beforeContent = '';
+                                }
+                            }
+                            undoCandidate = {
+                                toolName: toolMatch,
+                                filePath: resolvedPath,
+                                existedBefore,
+                                beforeContent,
+                                at: Date.now()
+                            };
+                        }
 
                         // Guardrail: when user asks for textual content, avoid analyze_page loops.
                         if (toolMatch === 'browser_interact') {
                             const browserAction = String(toolArgs?.action || '').toLowerCase();
                             if (browserAction === 'analyze_page' && isLikelyContentRequest(sessionMeta.topLevelRequest)) {
                                 if (showInternalToolLogs) {
-                                    console.log(statusLine(emoji.spark, 'Auto-Correction', 'analyze_page -> extract_text', 'info'));
+                                    console.log(statusLine(emoji.spark, 'Auto-Correction', 'analyze_page -> extract_text', 'success'));
                                 }
                                 toolArgs = { ...toolArgs, action: 'extract_text' };
                             }
@@ -1184,6 +1498,15 @@ ${planModeRules}
                                 console.log(statusLine(emoji.shield, 'BLOCKED', toolMatch, 'danger'));
                             }
                             logToolCall(toolMatch, toolArgs, `BLOCKED (${engineOutcome.risk.code})`, 'blocked');
+                            lastExecution = {
+                                toolName: toolMatch,
+                                args: toolArgs || {},
+                                thought: String(planMatch || '').trim(),
+                                status: 'blocked',
+                                resultPreview: String(engineOutcome?.risk?.reason || ''),
+                                retries: 0,
+                                at: Date.now()
+                            };
                             historyContext.push({ role: 'assistant', content: `[BLOCKED: ${toolMatch} — ${engineOutcome.risk.reason}]` });
                             if (planModeEnabled) {
                                 plannerState.issueCounter += 1;
@@ -1198,6 +1521,15 @@ ${planModeRules}
 
                         if (engineOutcome.status === 'cancelled') {
                             logToolCall(toolMatch, toolArgs, `CANCELLED (${engineOutcome.risk.code})`, 'blocked');
+                            lastExecution = {
+                                toolName: toolMatch,
+                                args: toolArgs || {},
+                                thought: String(planMatch || '').trim(),
+                                status: 'cancelled',
+                                resultPreview: String(engineOutcome?.risk?.reason || ''),
+                                retries: 0,
+                                at: Date.now()
+                            };
                             historyContext.push({ role: 'assistant', content: `[CANCELLED: ${toolMatch} requires confirmation]` });
                             isAgentIterating = false;
                             continue;
@@ -1206,6 +1538,19 @@ ${planModeRules}
                         const result = engineOutcome.result;
                         const retryCount = Number(engineOutcome.retries || 0);
                         const toolSucceeded = engineOutcome.status === 'success';
+                        lastExecution = {
+                            toolName: toolMatch,
+                            args: toolArgs || {},
+                            thought: String(planMatch || '').trim(),
+                            status: toolSucceeded ? 'success' : 'error',
+                            resultPreview: String(result || '').slice(0, 500),
+                            retries: retryCount,
+                            at: Date.now()
+                        };
+                        if (toolSucceeded && undoCandidate) {
+                            undoStack.push(undoCandidate);
+                            if (undoStack.length > 30) undoStack.shift();
+                        }
 
                         // DeepContext: track recent tool outcomes for situational awareness
                         recentToolResults.push({ tool: toolMatch, args: toolArgs, result: String(result || '').slice(0, 200) });
@@ -1259,7 +1604,7 @@ ${planModeRules}
                                 ? ` | Subplan: ${plannerState.activeSubplan.id}`
                                 : '';
                             if (showInternalToolLogs) {
-                                console.log(statusLine(emoji.map, 'Progress', `${doneCount}/${totalCount} tasks done${subplanStatus}`, 'cool'));
+                                console.log(statusLine(emoji.map, 'Progress', `${doneCount}/${totalCount} tasks done${subplanStatus}`, 'success'));
                             }
                         }
                         
@@ -1306,6 +1651,15 @@ ${planModeRules}
                 const midExecutionNoAction = isAgentIterating && !looksLikeCompletion(responseText);
                 await showAssistantMessage(responseText, REX_PERSONA);
                 historyContext.push({ role: 'assistant', content: responseText });
+                lastExecution = {
+                    toolName: null,
+                    args: {},
+                    thought: 'assistant-text-response',
+                    status: 'message',
+                    resultPreview: String(responseText || '').slice(0, 500),
+                    retries: 0,
+                    at: Date.now()
+                };
 
                 // Only force follow-up tool nudges in explicit planner mode.
                 // In normal chat mode, treat a plain-text response as final and return control to user.
@@ -1331,6 +1685,10 @@ ${planModeRules}
             p.log.error(pc.red(`Rex crashed: ${err.message}`));
         }
     }
+
+    if (process.stdin?.isTTY) {
+        process.stdin.removeListener('data', handleLiveBtwInput);
+    }
 }
 
 /**
@@ -1339,18 +1697,64 @@ ${planModeRules}
 function resolveAgentTarget(config, roleHint = 'runner') {
     if (!config?.multiModelAgentEnabled) return null;
 
+    const defaultModelForProvider = (provider) => {
+        if (provider === 'openai') return config.agentRunnerModel || 'gpt-5-mini';
+        if (provider === 'gemini') return config.agentPlannerGeminiModel || config.geminiModel || 'gemini-2.5-flash';
+        if (provider === 'claude') return 'claude-3-haiku-20240307';
+        if (provider === 'deepseek') return 'deepseek-chat';
+        return '';
+    };
+
+    const providerPreference = ['openai', 'gemini', 'claude', 'deepseek'];
+    const selectConfiguredProvider = () => providerPreference.find((p) => hasProviderKey(config, p)) || null;
+
     if (roleHint === 'runner') {
+        const configuredRunner = String(config.agentRunnerProvider || '').toLowerCase();
+        const runnerProvider = hasProviderKey(config, configuredRunner)
+            ? configuredRunner
+            : (selectConfiguredProvider() || configuredRunner || null);
+        if (!runnerProvider) return null;
+
         return {
-            provider: String(config.agentRunnerProvider || 'openai').toLowerCase(),
-            model: config.agentRunnerModel || 'gpt-5-mini'
+            provider: runnerProvider,
+            model: defaultModelForProvider(runnerProvider)
         };
     }
 
     const selected = resolveModelAlias(config.aiModel || '');
-    if (selected === 'gemini') {
+    if (selected === 'gemini' && hasProviderKey(config, 'gemini')) {
         return {
             provider: 'gemini',
             model: config.agentPlannerGeminiModel || 'gemini-2.5-flash'
+        };
+    }
+
+    if (selected === 'openai' && hasProviderKey(config, 'openai')) {
+        return {
+            provider: 'openai',
+            model: config.agentPlannerOpenAIModel || 'gpt-4o-mini'
+        };
+    }
+
+    if (selected === 'claude' && hasProviderKey(config, 'claude')) {
+        return {
+            provider: 'claude',
+            model: 'claude-3-haiku-20240307'
+        };
+    }
+
+    if (selected === 'deepseek' && hasProviderKey(config, 'deepseek')) {
+        return {
+            provider: 'deepseek',
+            model: 'deepseek-chat'
+        };
+    }
+
+    const fallbackPlanner = selectConfiguredProvider();
+    if (fallbackPlanner) {
+        return {
+            provider: fallbackPlanner,
+            model: defaultModelForProvider(fallbackPlanner)
         };
     }
 
@@ -1363,6 +1767,8 @@ function resolveAgentTarget(config, roleHint = 'runner') {
 function hasProviderKey(config, provider) {
     if (provider === 'openai') return !!config?.openaiKey;
     if (provider === 'gemini') return !!config?.geminiKey;
+    if (provider === 'claude') return !!config?.claudeKey;
+    if (provider === 'deepseek') return !!config?.deepseekKey;
     return false;
 }
 
@@ -1384,6 +1790,35 @@ async function getAgentResponse(messages, isLocal, signal, runtime = {}) {
         }
     } else {
         return await runCompletion(messages, signal);
+    }
+}
+
+async function runBtwSideQuery(question, config) {
+    const q = String(question || '').trim();
+    if (!q) return;
+
+    showUserMessage(q, 'You /btw');
+    const spinner = p.spinner();
+    spinner.start(pc.green('Rex opened a side channel...'));
+
+    try {
+        const messages = [
+            {
+                role: 'system',
+                content: 'You are Rex in a side-channel. Answer only the /btw question. Ignore ongoing task execution context. Keep it concise, useful, and witty.'
+            },
+            { role: 'user', content: q }
+        ];
+        const isLocal = config.aiModel === 'local-llama' || config.aiModel === 'ollama';
+        const answer = await getAgentResponse(messages, isLocal, null, {
+            config,
+            roleHint: 'runner'
+        });
+        spinner.stop(pc.green('Side channel response ready.'));
+        await showAssistantMessage(answer, 'Rex BTW');
+    } catch (err) {
+        spinner.stop(pc.red('Side channel failed.'));
+        p.note(pc.red(`Could not answer /btw: ${err.message}`), 'BTW');
     }
 }
 
@@ -1434,7 +1869,7 @@ async function processContextRefs(input) {
  * Handles slash commands typed by the user in the chat loop.
  * Returns true if a command was handled (so the loop should continue), false otherwise.
  */
-async function handleSlashCommand(input, historyContext, config, sessionMeta, plannerControls = null) {
+async function handleSlashCommand(input, historyContext, config, sessionMeta, plannerControls = null, runtimeState = {}) {
     if (!input.startsWith('/')) return false;
 
     const [cmdInput, ...args] = input.split(' ');
@@ -1442,6 +1877,311 @@ async function handleSlashCommand(input, historyContext, config, sessionMeta, pl
     const arg = args.join(' ').trim();
 
     switch (cmd) {
+        case '/rex-setup': {
+            p.note(pc.cyan('Starting Rex Persona Setup. Please answer the following questions to build REX.md...'), 'Rex Setup');
+            const questions = [
+                "What is your core personality? (e.g., friendly, sarcastic, professional)",
+                "What are your main hobbies or interests?",
+                "How do you prefer to communicate? (e.g., concise, detailed, using emojis)",
+                "What is your backstory or origin?",
+                "What are your likes and dislikes?",
+                "Do you have any quirky traits or catchphrases?"
+            ];
+            const answers = [];
+            for (const q of questions) {
+                const ans = await p.text({ message: q });
+                if (p.isCancel(ans)) {
+                    p.note(pc.yellow('Setup cancelled.'), 'Rex Setup');
+                    return true;
+                }
+                answers.push({ q, a: ans });
+            }
+            
+            p.note(pc.cyan('Thinking... Synthesizing persona into REX.md...'), 'Rex Setup');
+            const markdown = `# REX Persona & Characteristics\n\n` + answers.map(item => `## ${item.q}\n${item.a}`).join('\n\n');
+            fs.writeFileSync(path.join(process.cwd(), 'REX.md'), markdown, 'utf8');
+            p.note(pc.green('Successfully saved REX.md! I will now remember these details when you ask about me.'), 'Rex Setup');
+            return true;
+        }
+
+        case '/voice': {
+            if (arg === 'on') {
+                config.voiceEnabled = true;
+                saveConfig(config);
+                p.note(pc.green('Rex Voice (TTS) enabled. I will read responses aloud.'), 'Voice');
+            } else if (arg === 'off') {
+                config.voiceEnabled = false;
+                saveConfig(config);
+                p.note(pc.yellow('Rex Voice (TTS) disabled.'), 'Voice');
+            } else {
+                p.note(pc.yellow('Usage: /voice on | off'), 'Voice');
+            }
+            return true;
+        }
+
+        case '/listen': {
+            const s = p.spinner();
+            s.start('Listening... (speak now, then press Enter to stop)');
+            const audioPath = path.join(process.cwd(), '.agent', `record_${Date.now()}.wav`);
+            ensureAgentDir();
+
+            try {
+                // Windows-native recording via PowerShell and System.Media
+                const recordScript = `
+$w = New-Object System.Media.SoundPlayer;
+$r = New-Object System.Media.SoundPlayer;
+# Note: Recording natively in PS without external libs is tricky for WAV, 
+# so we use a simple command-line approach if possible or a prompt.
+# For now, let's assume the user can provide a file or we use a small helper.
+`;
+                // If the user has ffmpeg, we can use it. If not, we'll ask for a file or a path.
+                p.log.warn('Near real-time recording requires ffmpeg or sox. Please provide an audio file path for STT analysis.');
+                const file = await p.text({ message: 'Path to audio file (or drag and drop):' });
+                if (p.isCancel(file)) { s.stop('Cancelled.'); return true; }
+                
+                const { transcribeAudio } = await import('./ai.js');
+                const text = await transcribeAudio(file.trim().replace(/^"|"$/g, ''));
+                s.stop(pc.green('Transcription complete!'));
+                p.note(pc.italic(`"${text}"`), 'Transcribed');
+                historyContext.push({ role: 'user', content: await processContextRefs(text) });
+                return false; 
+            } catch (e) {
+                s.stop(pc.red('STT Error: ' + e.message));
+                return true;
+            }
+        }
+
+        case '/btw': {
+            if (!arg) {
+                p.note(pc.yellow('Usage: /btw <your unrelated question>'), 'BTW');
+                return true;
+            }
+            await runBtwSideQuery(arg, config);
+            return true;
+        }
+
+        case '/todo': {
+            const value = String(arg || '').trim();
+            const items = runtimeState.todoItems || [];
+
+            if (!value || value === 'list' || value === 'ls') {
+                if (!items.length) {
+                    p.note(pc.dim('No todo items yet. Use /todo add <task>'), 'TODO');
+                    return true;
+                }
+                const rows = items.map((t, i) => `${i + 1}. ${t.done ? pc.green('[x]') : pc.dim('[ ]')} ${t.text}`).join('\n');
+                p.note(rows, 'TODO');
+                return true;
+            }
+
+            if (value.startsWith('add ')) {
+                const text = value.slice(4).trim();
+                if (!text) {
+                    p.note(pc.yellow('Usage: /todo add <task>'), 'TODO');
+                    return true;
+                }
+                items.push({ text, done: false, createdAt: Date.now() });
+                p.note(pc.green(`Added todo #${items.length}: ${text}`), 'TODO');
+                return true;
+            }
+
+            if (value.startsWith('done ')) {
+                const idx = Number.parseInt(value.slice(5).trim(), 10);
+                if (!Number.isFinite(idx) || idx < 1 || idx > items.length) {
+                    p.note(pc.yellow('Usage: /todo done <index>'), 'TODO');
+                    return true;
+                }
+                items[idx - 1].done = true;
+                p.note(pc.green(`Marked todo #${idx} done.`), 'TODO');
+                return true;
+            }
+
+            if (value.startsWith('rm ')) {
+                const idx = Number.parseInt(value.slice(3).trim(), 10);
+                if (!Number.isFinite(idx) || idx < 1 || idx > items.length) {
+                    p.note(pc.yellow('Usage: /todo rm <index>'), 'TODO');
+                    return true;
+                }
+                const [removed] = items.splice(idx - 1, 1);
+                p.note(pc.green(`Removed todo #${idx}: ${removed.text}`), 'TODO');
+                return true;
+            }
+
+            if (value === 'clear') {
+                items.length = 0;
+                p.note(pc.green('Cleared all todo items.'), 'TODO');
+                return true;
+            }
+
+            p.note(pc.yellow('Usage: /todo [list|add <task>|done <index>|rm <index>|clear]'), 'TODO');
+            return true;
+        }
+
+        case '/peek': {
+            const last = runtimeState.getLastExecution ? runtimeState.getLastExecution() : null;
+            const iterating = runtimeState.getIsIterating ? runtimeState.getIsIterating() : false;
+            const todoItems = runtimeState.todoItems || [];
+            const pinnedNotes = runtimeState.pinnedNotes || [];
+            const interruptCount = (runtimeState.interruptQueue || []).length;
+            const done = todoItems.filter(t => t.done).length;
+
+            const lines = [
+                `mode: ${iterating ? pc.green('executing') : pc.dim('idle')}`,
+                `goal: ${pc.green(runtimeState.getSessionGoal ? runtimeState.getSessionGoal() || '(unset)' : '(unset)')}`,
+                `history turns: ${runtimeState.getHistoryCount ? runtimeState.getHistoryCount() : historyContext.length}`,
+                `todos: ${done}/${todoItems.length} done`,
+                `pins: ${pinnedNotes.length}`,
+                `interrupt queue: ${interruptCount}`
+            ];
+
+            if (last) {
+                lines.push(`last tool: ${last.toolName || '(none)'}`);
+                lines.push(`last status: ${last.status || 'unknown'}`);
+            }
+
+            p.note(lines.join('\n'), 'Peek');
+            return true;
+        }
+
+        case '/undo-last': {
+            const stack = runtimeState.undoStack || [];
+            if (!stack.length) {
+                p.note(pc.yellow('Nothing to undo yet.'), 'Undo');
+                return true;
+            }
+
+            const entry = stack.pop();
+            try {
+                if (entry.existedBefore) {
+                    fs.writeFileSync(entry.filePath, entry.beforeContent, 'utf-8');
+                } else if (fs.existsSync(entry.filePath)) {
+                    fs.unlinkSync(entry.filePath);
+                }
+                p.note(pc.green(`Undo complete for ${entry.filePath}`), 'Undo');
+            } catch (e) {
+                p.note(pc.red(`Undo failed: ${e.message}`), 'Undo');
+            }
+            return true;
+        }
+
+        case '/explain-last': {
+            const last = runtimeState.getLastExecution ? runtimeState.getLastExecution() : null;
+            if (!last) {
+                p.note(pc.yellow('No previous execution data found.'), 'Explain Last');
+                return true;
+            }
+
+            const details = [
+                `tool: ${last.toolName || '(none)'}`,
+                `status: ${last.status || 'unknown'}`,
+                `thought: ${last.thought || '(none)'}`,
+                `args: ${safePretty(last.args || {}, 400).replace(/\n/g, ' ')}`,
+                `result: ${String(last.resultPreview || '').slice(0, 300) || '(none)'}`
+            ];
+            p.note(details.join('\n'), 'Explain Last');
+            return true;
+        }
+
+        case '/compact': {
+            if (!runtimeState.compactHistory) {
+                p.note(pc.red('Compact is unavailable in this session.'), 'Compact');
+                return true;
+            }
+            const res = runtimeState.compactHistory();
+            if (!res.didCompact) {
+                p.note(pc.dim('History is already compact.'), 'Compact');
+                return true;
+            }
+            p.note(pc.green(`Compacted history by removing ${res.removedCount} older messages.`), 'Compact');
+            return true;
+        }
+
+        case '/pin': {
+            const value = String(arg || '').trim();
+            const pins = runtimeState.pinnedNotes || [];
+
+            if (!value || value === 'list' || value === 'ls') {
+                if (!pins.length) {
+                    p.note(pc.dim('No pinned notes yet. Use /pin add <note>'), 'Pin');
+                    return true;
+                }
+                const rows = pins.map((n, i) => `${i + 1}. ${n}`).join('\n');
+                p.note(rows, 'Pinned Notes');
+                return true;
+            }
+
+            if (value.startsWith('add ')) {
+                const note = value.slice(4).trim();
+                if (!note) {
+                    p.note(pc.yellow('Usage: /pin add <note>'), 'Pin');
+                    return true;
+                }
+                pins.push(note);
+                p.note(pc.green(`Pinned #${pins.length}.`), 'Pin');
+                return true;
+            }
+
+            if (value.startsWith('rm ')) {
+                const idx = Number.parseInt(value.slice(3).trim(), 10);
+                if (!Number.isFinite(idx) || idx < 1 || idx > pins.length) {
+                    p.note(pc.yellow('Usage: /pin rm <index>'), 'Pin');
+                    return true;
+                }
+                pins.splice(idx - 1, 1);
+                p.note(pc.green(`Removed pin #${idx}.`), 'Pin');
+                return true;
+            }
+
+            if (value === 'clear') {
+                pins.length = 0;
+                p.note(pc.green('Cleared all pinned notes.'), 'Pin');
+                return true;
+            }
+
+            p.note(pc.yellow('Usage: /pin [list|add <note>|rm <index>|clear]'), 'Pin');
+            return true;
+        }
+
+        case '/diff': {
+            try {
+                const cwd = process.cwd();
+                if (!fs.existsSync(path.join(cwd, '.git'))) {
+                    p.note(pc.yellow('No git repository found in current directory.'), 'Diff');
+                    return true;
+                }
+                const names = execSync('git diff --name-only', { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+                const stat = execSync('git diff --stat', { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+                const staged = execSync('git diff --cached --name-only', { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+                const out = [
+                    pc.green('Unstaged files:'),
+                    names || pc.dim('(none)'),
+                    '',
+                    pc.green('Diff stat:'),
+                    stat || pc.dim('(none)'),
+                    '',
+                    pc.green('Staged files:'),
+                    staged || pc.dim('(none)')
+                ].join('\n');
+                p.note(out, 'Diff');
+            } catch (e) {
+                p.note(pc.red(`Diff failed: ${e.message}`), 'Diff');
+            }
+            return true;
+        }
+
+        case '/interrupt-with': {
+            if (!arg) {
+                p.note(pc.yellow('Usage: /interrupt-with <high-priority request>'), 'Interrupt');
+                return true;
+            }
+            const queue = runtimeState.interruptQueue || [];
+            queue.push(arg);
+            p.note(pc.green(`Interrupt queued: ${arg.slice(0, 80)}`), 'Interrupt');
+            if (runtimeState.setIsIterating) runtimeState.setIsIterating(true);
+            if (runtimeState.setAutoPilotCount) runtimeState.setAutoPilotCount(0);
+            return true;
+        }
+
         case '/clear': {
             console.clear();
             p.intro(theme('RexAI channel refreshed.'));
@@ -1507,9 +2247,189 @@ async function handleSlashCommand(input, historyContext, config, sessionMeta, pl
             } else if (arg === 'pull') {
                 p.note(pc.dim('Pulling and decrypting team memory...'), 'Memory');
                 p.note(pullMemory(), 'Memory');
+            } else if (arg.startsWith('set ')) {
+                const payload = arg.replace(/^set\s+/i, '').trim();
+                const firstSpace = payload.indexOf(' ');
+                if (firstSpace === -1) {
+                    p.note(pc.yellow('Usage: /memory set <key> <value>'), 'Memory');
+                } else {
+                    const key = payload.slice(0, firstSpace).trim();
+                    const value = payload.slice(firstSpace + 1).trim();
+                    p.note(setUserPreference(key, value, { source: 'slash-command' }), 'Memory');
+                }
+            } else if (arg.startsWith('get ')) {
+                const key = arg.replace(/^get\s+/i, '').trim();
+                if (!key) {
+                    p.note(pc.yellow('Usage: /memory get <key>'), 'Memory');
+                } else {
+                    const row = getUserPreference(key);
+                    if (!row) {
+                        p.note(pc.yellow(`Preference not found: ${key}`), 'Memory');
+                    } else {
+                        p.note(`${row.key} = ${String(row.value)}`, 'Memory');
+                    }
+                }
+            } else if (arg === 'list') {
+                const summary = describePreferenceStore();
+                if (!summary.preview.length) {
+                    p.note(pc.dim('No indexed preferences yet.'), 'Memory');
+                } else {
+                    p.note(`Keys: ${summary.totalKeys}\n${summary.preview.join('\n')}`, 'Memory');
+                }
             } else {
-                p.note(pc.yellow('Usage: /memory sync | /memory pull'), 'Memory');
+                p.note(pc.yellow('Usage: /memory sync | /memory pull | /memory set <key> <value> | /memory get <key> | /memory list'), 'Memory');
             }
+            return true;
+        }
+
+        case '/toggle': {
+            const value = String(arg || '').trim().toLowerCase();
+            if (!value) {
+                p.note([
+                    `debug: ${runtimeState.setDebugMode ? pc.green('supported') : pc.dim('unsupported')}`,
+                    `quiet: ${runtimeState.setQuietMode ? pc.green('supported') : pc.dim('unsupported')}`,
+                    `actions: ${runtimeState.setShowActions ? pc.green('supported') : pc.dim('unsupported')}`,
+                    `internal-logs: ${pc.green('global')}`,
+                    `plan: ${plannerControls ? pc.green('available') : pc.dim('nav')}`
+                ].join('\n'), 'Toggle Status');
+                return true;
+            }
+
+            const [flag, state] = value.split(/\s+/);
+            const isEnable = state === 'on' || state === 'true' || state === 'enable';
+            const isDisable = state === 'off' || state === 'false' || state === 'disable';
+            const toggle = state === undefined || (!isEnable && !isDisable);
+
+            if (flag === 'debug') {
+                if (runtimeState.setDebugMode) {
+                    const next = toggle ? !runtimeState.getDebugMode() : isEnable;
+                    runtimeState.setDebugMode(next);
+                    p.note(pc.green(`Debug mode: ${next ? 'ON' : 'OFF'}`), 'Toggle');
+                }
+            } else if (flag === 'quiet') {
+                if (runtimeState.setQuietMode) {
+                    const next = toggle ? !runtimeState.getQuietMode() : isEnable;
+                    runtimeState.setQuietMode(next);
+                    p.note(pc.green(`Quiet mode: ${next ? 'ON' : 'OFF'}`), 'Toggle');
+                }
+            } else if (flag === 'actions') {
+                if (runtimeState.setShowActions) {
+                    const next = toggle ? !runtimeState.getShowActions() : isEnable;
+                    runtimeState.setShowActions(next);
+                    p.note(pc.green(`Show actions: ${next ? 'ON' : 'OFF'}`), 'Toggle');
+                }
+            } else if (flag === 'internal-logs') {
+                const next = toggle ? !config.showInternalToolLogs : isEnable;
+                config.showInternalToolLogs = next;
+                p.note(pc.green(`Internal tool logs: ${next ? 'ON' : 'OFF'}`), 'Toggle');
+            } else if (flag === 'plan') {
+                if (plannerControls) {
+                    const next = toggle ? !plannerControls.getPlanMode() : isEnable;
+                    plannerControls.setPlanMode(next);
+                    p.note(pc.green(`Planner mode: ${next ? 'ON' : 'OFF'}`), 'Toggle');
+                }
+            } else {
+                p.note(pc.yellow('Usage: /toggle [debug|quiet|actions|internal-logs|plan] [on|off]'), 'Toggle');
+            }
+            return true;
+        }
+
+        case '/cortex': {
+            const [action, ...cmdArgs] = String(arg || '').trim().split(/\s+/);
+            const subArg = cmdArgs.join(' ').trim();
+
+            if (action === 'map') {
+                const { nerve_map } = await import('./cortexKit.js');
+                const res = await nerve_map({ directory: process.cwd() });
+                p.note(res, 'CortexKit: Nerve Map');
+            } else if (action === 'hindsight') {
+                const { hindsight } = await import('./cortexKit.js');
+                if (!subArg) {
+                    p.note(pc.yellow('Usage: /cortex hindsight <task-name>'), 'CortexKit');
+                } else {
+                    const res = await hindsight({ taskName: subArg, whatWorked: 'Manual log via chat', lessonsLearned: 'User triggered hindsight save' });
+                    p.note(res, 'CortexKit: Hindsight');
+                }
+            } else if (action === 'echo') {
+                const { echo_chamber } = await import('./cortexKit.js');
+                if (!subArg) {
+                    p.note(pc.yellow('Usage: /cortex echo <claim>'), 'CortexKit');
+                } else {
+                    const res = await echo_chamber({ claim: subArg });
+                    p.note(res, 'CortexKit: Echo Chamber');
+                }
+            } else if (action === 'deja') {
+                const { deja_vu } = await import('./cortexKit.js');
+                const res = await deja_vu({ query: subArg || 'current task' });
+                p.note(res, 'CortexKit: Déjà Vu');
+            } else if (action === 'phantom') {
+                const { phantom_run } = await import('./cortexKit.js');
+                p.note(pc.dim('Executing phantom run on last history turn...'), 'CortexKit');
+                const lastMsg = historyContext.filter(m => m.role === 'assistant').pop();
+                const steps = (lastMsg?.content || '').match(/\{[\s\S]*?\}/g)?.map(s => { try { return JSON.parse(s); } catch { return null; } }).filter(Boolean) || [];
+                const res = await phantom_run({ steps });
+                p.note(res, 'CortexKit: Phantom Run');
+            } else {
+                p.note(pc.yellow('Usage: /cortex [map|hindsight|echo|deja|phantom]'), 'CortexKit');
+            }
+            return true;
+        }
+
+        case '/swarm': {
+            if (!arg) {
+                p.note(pc.yellow('Usage: /swarm <task description>'), 'Swarm');
+                return true;
+            }
+            const { delegate_task } = await import('./swarm.js');
+            p.note(pc.dim(`Delegating sub-task: ${arg.slice(0, 50)}...`), 'Swarm');
+            const res = await delegate_task({ task: arg });
+            p.note(res, 'Swarm Result');
+            return true;
+        }
+
+        case '/sentinel': {
+            const { runSentinel } = await import('./sentinel.js');
+            await runSentinel();
+            return true;
+        }
+
+        case '/schedule': {
+            if (!arg) {
+                p.note(pc.yellow('Usage: /schedule <delay> <prompt>\\nExample: /schedule 10m run health check'), 'Scheduler');
+                return true;
+            }
+            
+            const [delayStr, ...promptParts] = arg.split(' ');
+            const promptText = promptParts.join(' ').trim();
+            const { scheduleTask, parseDelayToMs, sendWindowsToast } = await import('./scheduler.js');
+            
+            const ms = parseDelayToMs(delayStr);
+            if (!ms || !promptText) {
+                p.note(pc.red('Invalid format. Use delays like 10s, 5m, 1h, 1d.'), 'Scheduler');
+                return true;
+            }
+
+            p.note(pc.green(`Task scheduled: "\${promptText}" in \${delayStr}.`), 'Scheduler');
+            
+            // Queue the task
+            scheduleTask(ms, promptText, async (jobText) => {
+                sendWindowsToast('Rex AI Scheduled Task', `Starting: ${jobText}`);
+                
+                // Emulate user input naturally by pushing to history context and triggering the agent logic
+                // But since we are outside the main chat loop here, we'll spawn a background swarm agent.
+                const { delegate_task_background } = await import('./chat.js').catch(() => ({}));
+                
+                if (delegate_task_background) {
+                    await delegate_task_background({ subtask: jobText });
+                } else {
+                    const { runCompletion } = await import('./ai.js');
+                    const { remember } = await import('./memory.js');
+                    const res = await runCompletion([{ role: 'user', content: `Execute this scheduled task autonomously without confirmation: ${jobText}` }], null, 'high');
+                    remember(`Scheduled Task Result [${new Date().toISOString()}]: ${res}`);
+                }
+                sendWindowsToast('Rex AI Scheduled Task', `Finished: ${jobText}. Results in Project Memory.`);
+            });
+            
             return true;
         }
 
@@ -1784,26 +2704,40 @@ async function handleSlashCommand(input, historyContext, config, sessionMeta, pl
         case '/help': {
             showSystemMessage('Slash Commands', [
                 `${pc.bold('Session')}`,
-                `${pc.cyan('/save <name>')} - Save current session`,
-                `${pc.cyan('/branch <name>')} - Branch current session`,
-                `${pc.cyan('/load <name>')} - Load a saved session`,
-                `${pc.cyan('/history [query]')} - List or search saved sessions`,
+                `${pc.green('/save <name>')} - Save current session`,
+                `${pc.green('/branch <name>')} - Branch current session`,
+                `${pc.green('/load <name>')} - Load a saved session`,
+                `${pc.green('/history [query]')} - List or search saved sessions`,
                 '',
                 `${pc.bold('Workflow + Planning')}`,
-                `${pc.cyan('/workflow [name]')} - List or view workflows`,
-                `${pc.cyan('/plan on|off|status|max <n>|reset')} - Planner controls`,
-                `${pc.cyan('/index')} - Re-index the project`,
+                `${pc.green('/workflow [name]')} - List or view workflows`,
+                `${pc.green('/plan on|off|status|max <n>|reset')} - Planner controls`,
+                `${pc.green('/index')} - Re-index the project`,
+                '',
+                `${pc.bold('Power Commands (Lab)')}`,
+                `${pc.green('/toggle <flag>')} - Session settings (debug, quiet, actions, internal-logs, plan)`,
+                `${pc.green('/cortex <action>')} - CortexKit (map, hindsight, echo, deja, phantom)`,
+                `${pc.green('/swarm <task>')} - Delegate task to background sub-agent`,
                 '',
                 `${pc.bold('Utilities')}`,
-                `${pc.cyan('/voice <file>')} - Transcribe audio file to text`,
-                `${pc.cyan('/browser')} - List active browser tabs`,
-                `${pc.cyan('/babysit [goal|status|snapshot|stop]')} - Passive teach mode with cursor-follow + yes/no labeling`,
-                `${pc.cyan('/practice mode <goal>')} - Supervised autonomous practice with nano coach`,
-                `${pc.cyan('/cost [reset|rebuild]')} - Session/workspace AI spend`,
-                `${pc.cyan('/profile save|load <name>')} - Manage config profiles`,
-                `${pc.cyan('/clear')} - Clear terminal screen`,
-                `${pc.cyan('/exit')} - Exit RexAI`,
-                `${pc.cyan('/help')} - Show this help`,
+                `${pc.green('/voice <file>')} - Transcribe audio file to text`,
+                `${pc.green('/btw <question>')} - Side-channel question unrelated to current execution`,
+                `${pc.green('/interrupt-with <request>')} - High-priority interrupt injected into active execution`,
+                `${pc.green('/todo [list|add|done|rm|clear]')} - Session todo list`,
+                `${pc.green('/peek')} - Quick live status snapshot`,
+                `${pc.green('/undo-last')} - Revert latest write/patch change`,
+                `${pc.green('/explain-last')} - Explain last execution decision`,
+                `${pc.green('/compact')} - Compress conversation history window`,
+                `${pc.green('/pin [list|add|rm|clear]')} - Manage pinned notes injected into context`,
+                `${pc.green('/diff')} - Show current git diff summary`,
+                `${pc.green('/browser')} - List active browser tabs`,
+                `${pc.green('/babysit [goal|status|snapshot|stop]')} - Passive teach mode with cursor-follow + yes/no labeling`,
+                `${pc.green('/practice mode <goal>')} - Supervised autonomous practice with nano coach`,
+                `${pc.green('/cost [reset|rebuild]')} - Session/workspace AI spend`,
+                `${pc.green('/profile save|load <name>')} - Manage config profiles`,
+                `${pc.green('/clear')} - Clear terminal screen`,
+                `${pc.green('/exit')} - Exit RexAI`,
+                `${pc.green('/help')} - Show this help`,
                 '',
                 `${pc.dim('Context refs: @file:path/to/file  @url:https://...')}`
             ].join('\n'));

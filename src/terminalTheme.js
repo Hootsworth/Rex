@@ -24,7 +24,7 @@ const toneDecorators = {
 
 // ── Emoji Palette ──
 export const emoji = {
-    rex:       '🦖',
+    rex:       '🦕',
     thinking:  '💭',
     spark:     '✨',
     bolt:      '⚡',
@@ -233,39 +233,41 @@ export function wrapAnsiText(text = '', width = 78) {
     return output;
 }
 
-// Premium framed container with colored left accent bar
+// Premium unboxed container with full-width aesthetics
 export function renderFrame(title, lines = [], options = {}) {
-    const g = terminalGlyphs();
-    const width = clamp(options.width || Math.min(process.stdout.columns || 96, 96), 60, 96);
-    const innerWidth = width - 4;
+    const cols = process.stdout.columns || 80;
     const tone = toneDecorators[options.tone] || toneDecorators.brand;
-    const accentBar = options.accentBar !== false;
     const icon = options.icon || '';
     const body = Array.isArray(lines) ? lines : String(lines).split('\n');
-    const wrappedBody = body.flatMap((line) => wrapAnsiText(line, innerWidth - 2));
+    const wrappedBody = body.flatMap((line) => wrapAnsiText(line, cols - 6));
 
-    const bar = accentBar ? tone('▍') : pc.dim(g.side);
-    const rightBar = pc.dim(g.side);
+    const bg = tone === toneDecorators.danger ? '\x1b[48;2;45;20;20m' :
+               tone === toneDecorators.warning ? '\x1b[48;2;45;35;15m' :
+               tone === toneDecorators.success ? '\x1b[48;2;15;35;25m' :
+               '\x1b[48;2;20;25;35m'; // Default slate/brand
+    const reset = '\x1b[0m';
     const rows = [];
 
-    rows.push(pc.dim(`${g.topL}${g.line.repeat(width - 2)}${g.topR}`));
-    const capsule = `${pc.dim('[')}${tone(pc.bold(String(title).toUpperCase()))}${pc.dim(']')}`;
-    const titleText = icon ? `${icon}  ${capsule}` : capsule;
-    rows.push(`${bar} ${padAnsi(titleText, innerWidth)} ${rightBar}`);
-    rows.push(`${bar} ${pc.dim(`┄`.repeat(innerWidth))} ${rightBar}`);
+    rows.push('');
+    const titleCaps = String(title).toUpperCase();
+    const titleText = icon ? `${icon}  ${tone(pc.bold(titleCaps))}` : tone(pc.bold(titleCaps));
+    
+    // Header
+    rows.push(`${bg}${padAnsi(`  ${titleText}`, cols)}${reset}`);
+    rows.push(`${bg}${padAnsi(`  ${pc.dim('─'.repeat(Math.min(cols - 4, titleCaps.length + 6)))}`, cols)}${reset}`);
 
     if (wrappedBody.length) {
         for (const line of wrappedBody) {
-            rows.push(`${bar} ${padAnsi(line, innerWidth)} ${rightBar}`);
+            rows.push(`${bg}${padAnsi(`  ${line}`, cols)}${reset}`);
         }
     }
 
     if (options.footer) {
-        rows.push(`${bar} ${padAnsi('', innerWidth)} ${rightBar}`);
-        rows.push(`${bar} ${padAnsi(pc.dim(options.footer), innerWidth)} ${rightBar}`);
+        rows.push(`${bg}${padAnsi('', cols)}${reset}`);
+        rows.push(`${bg}${padAnsi(`  ${pc.dim(options.footer)}`, cols)}${reset}`);
     }
 
-    rows.push(pc.dim(`${g.botL}${g.line.repeat(width - 2)}${g.botR}`));
+    rows.push(`${bg}${padAnsi('', cols)}${reset}`);
     return rows.join('\n');
 }
 

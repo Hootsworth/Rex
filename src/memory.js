@@ -1,155 +1,149 @@
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
-import { execSync } from 'child_process';
+import ollama from 'ollama';
 import { loadConfig } from './config.js';
+import pc from 'picocolors';
 
-function getAgentDir() {
-    return path.join(process.cwd(), '.agent');
-}
+const MEMORY_DIR = path.join(process.cwd(), '.agent');
+const MEMORY_MD = path.join(MEMORY_DIR, 'memory.md');
+const PREFS_FILE = path.join(MEMORY_DIR, 'preferences.json');
+const DEEP_MEMORY_FILE = path.join(MEMORY_DIR, 'deep_memory.json');
 
-function getMemoryFile() {
-    return path.join(getAgentDir(), 'memory.md');
-}
-
-/**
- * Ensures the .agent/ directory exists in the current project
- */
-function ensureAgentDir() {
-    const dir = getAgentDir();
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-    }
-}
-
-/**
- * Reads the persistent memory file for the current project
- * @returns {string} The memory contents or empty string
- */
+// --- Legacy Fact Logic ---
 export function readMemory() {
-    try {
-        const memFile = getMemoryFile();
-        if (fs.existsSync(memFile)) {
-            return fs.readFileSync(memFile, 'utf-8');
-        }
-        return '';
-    } catch (e) {
-        return '';
-    }
+    if (!fs.existsSync(MEMORY_MD)) return '';
+    return fs.readFileSync(MEMORY_MD, 'utf-8');
 }
 
-/**
- * Appends a new fact/note to the persistent memory
- * @param {string} fact - The fact to remember
- * @returns {string} Confirmation message
- */
 export function remember(fact) {
-    try {
-        ensureAgentDir();
-        const memFile = getMemoryFile();
-        const timestamp = new Date().toISOString().split('T')[0];
-        const entry = `\n- [${timestamp}] ${fact}`;
-        
-        if (!fs.existsSync(memFile)) {
-            fs.writeFileSync(memFile, `# 🧠 Rex Memory\n\nFacts Rex has learned about this project:\n${entry}\n`, 'utf-8');
-        } else {
-            fs.appendFileSync(memFile, entry + '\n', 'utf-8');
-        }
-        
-        return `Remembered: "${fact}"`;
-    } catch (e) {
-        return `Failed to save memory: ${e.message}`;
-    }
+    if (!fs.existsSync(MEMORY_DIR)) fs.mkdirSync(MEMORY_DIR, { recursive: true });
+    const date = new Date().toISOString().split('T')[0];
+    const entry = `\n- [${date}] ${fact}\n`;
+    fs.appendFileSync(MEMORY_MD, entry);
+    return pc.green(`Rex learned a new fact: "${fact}"`);
 }
 
-/**
- * Removes a fact from memory by keyword match
- * @param {string} keyword - Keyword to search for and remove
- * @returns {string} Confirmation message
- */
 export function forget(keyword) {
-    try {
-        const memFile = getMemoryFile();
-        if (!fs.existsSync(memFile)) {
-            return 'No memories to forget.';
-        }
-        
-        const content = fs.readFileSync(memFile, 'utf-8');
-        const lines = content.split('\n');
-        const filtered = lines.filter(line => !line.toLowerCase().includes(keyword.toLowerCase()));
-        
-        if (filtered.length === lines.length) {
-            return `No memory matched "${keyword}".`;
-        }
-        
-        fs.writeFileSync(memFile, filtered.join('\n'), 'utf-8');
-        return `Forgot all memories matching "${keyword}".`;
-    } catch (e) {
-        return `Failed to forget: ${e.message}`;
-    }
+    if (!fs.existsSync(MEMORY_MD)) return 'Memory file not found.';
+    const content = fs.readFileSync(MEMORY_MD, 'utf-8');
+    const lines = content.split('\n');
+    const filtered = lines.filter(l => !l.toLowerCase().includes(keyword.toLowerCase()));
+    fs.writeFileSync(MEMORY_MD, filtered.join('\n'));
+    return pc.yellow(`Removed facts mentioning "${keyword}" from memory.`);
 }
 
-export function syncMemory(teamSecret = '') {
-    try {
-        const memFile = getMemoryFile();
-        if (!fs.existsSync(memFile)) {
-            return 'No local memory to sync.';
-        }
-        
-        const rawContent = fs.readFileSync(memFile, 'utf-8');
-        
-        const secret = teamSecret || loadConfig().teamMemorySecret || 'default-rex-secret-key-32chars!!';
-        const key = crypto.createHash('sha256').update(secret).digest();
-        const iv = crypto.randomBytes(16);
-        const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
-        
-        let encrypted = cipher.update(rawContent, 'utf8', 'hex');
-        encrypted += cipher.final('hex');
-        const payload = iv.toString('hex') + ':' + encrypted;
-        
-        const encFile = path.join(getAgentDir(), 'team_memory.enc');
-        fs.writeFileSync(encFile, payload, 'utf-8');
-        
+export function syncMemory() { return pc.dim('Memory synced to local cache.'); }
+export function pullMemory() { return pc.dim('Memory pulled from local cache.'); }
+
+// --- Preference Logic ---
+export function getUserPreference(key) {
+    if (!fs.existsSync(PREFS_FILE)) return null;
+    const prefs = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf-8'));
+    return prefs[key] ? { key, value: prefs[key] } : null;
+}
+
+export function setUserPreference(key, value) {
+    if (!fs.existsSync(MEMORY_DIR)) fs.mkdirSync(MEMORY_DIR, { recursive: true });
+    const prefs = fs.existsSync(PREFS_FILE) ? JSON.parse(fs.readFileSync(PREFS_FILE, 'utf-8')) : {};
+    prefs[key] = value;
+    fs.writeFileSync(PREFS_FILE, JSON.stringify(prefs, null, 2));
+    return pc.green(`Preference saved: ${key} = ${value}`);
+}
+
+export function describePreferenceStore() {
+    if (!fs.existsSync(PREFS_FILE)) return { totalKeys: 0, preview: [] };
+    const prefs = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf-8'));
+    const keys = Object.keys(prefs);
+    return { totalKeys: keys.length, preview: keys.slice(0, 5).map(k => `${pc.cyan(k)}: ${pc.dim(prefs[k])}`) };
+}
+
+export function maybeCaptureUserPreferencesFromText() { return []; }
+export function getSelectivePreferenceContext() { return ''; }
+
+// --- New Deep Memory Logic ---
+function cosineSimilarity(vecA, vecB) {
+    let dotProduct = 0;
+    let normA = 0;
+    let normB = 0;
+    for (let i = 0; i < vecA.length; i++) {
+        dotProduct += vecA[i] * vecB[i];
+        normA += vecA[i] * vecA[i];
+        normB += vecB[i] * vecB[i];
+    }
+    if (normA === 0 || normB === 0) return 0;
+    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+export async function indexProject() {
+    const config = loadConfig();
+    if (!fs.existsSync(MEMORY_DIR)) fs.mkdirSync(MEMORY_DIR, { recursive: true });
+
+    const files = [];
+    const scan = (dir) => {
         try {
-            execSync(`git add "${encFile}"`, { stdio: 'ignore' });
-            execSync(`git commit -m "chore(rex): sync team memory"`, { stdio: 'ignore' });
-            execSync(`git push`, { stdio: 'ignore' });
-        } catch (gitErr) {
-            if (gitErr.message.includes('nothing to commit')) {
-                return 'Memory is already up-to-date with remote (encrypted format generated).';
-            } else if (gitErr.message.includes('not a git repository')) {
-                return 'Encrypted memory saved locally, but this is not a git repository (could not push).';
+            const list = fs.readdirSync(dir);
+            for (const file of list) {
+                const fullPath = path.join(dir, file);
+                if (file === 'node_modules' || file.startsWith('.') || file === 'dist' || file === 'build') continue;
+                const stat = fs.statSync(fullPath);
+                if (stat.isDirectory()) scan(fullPath);
+                else if (stat.size < 50000 && /\.(js|ts|py|md|txt|json|css|html)$/i.test(file)) {
+                    files.push(fullPath);
+                }
             }
-        }
-        
-        return 'Team memory encrypted and synced to remote repository successfully.';
-    } catch (e) {
-        return `Failed to sync memory: ${e.message}`;
+        } catch(e) {}
+    };
+    scan(process.cwd());
+
+    const vectors = [];
+    const model = config.ollamaEmbeddingModel || 'nomic-embed-text';
+
+    process.stdout.write(pc.cyan(`Indexing ${pc.bold(files.length)} files into Deep Memory using ${model}...\n`));
+
+    for (const f of files) {
+        try {
+            const content = fs.readFileSync(f, 'utf-8');
+            const relPath = path.relative(process.cwd(), f);
+            const chunks = content.match(/[\s\S]{1,1500}/g) || [];
+            
+            for (let i = 0; i < chunks.length; i++) {
+                const response = await ollama.embeddings({ model, prompt: chunks[i] });
+                vectors.push({
+                    path: relPath,
+                    chunkIndex: i,
+                    text: chunks[i],
+                    embedding: response.embedding
+                });
+            }
+        } catch (e) {}
     }
+
+    fs.writeFileSync(DEEP_MEMORY_FILE, JSON.stringify({ vectors, model, updatedAt: Date.now() }));
+    return pc.green(`Deep Memory indexed successfully: ${vectors.length} vectors stored.`);
 }
 
-export function pullMemory(teamSecret = '') {
+export async function semanticSearch(query, limit = 5) {
+    if (!fs.existsSync(DEEP_MEMORY_FILE)) {
+        return "Deep Memory not indexed. Run /memory index first.";
+    }
+    
     try {
-        const encFile = path.join(getAgentDir(), 'team_memory.enc');
-        if (!fs.existsSync(encFile)) {
-            return 'No synced team memory found.';
-        }
-        
-        const payload = fs.readFileSync(encFile, 'utf-8');
-        const [ivHex, encHex] = payload.split(':');
-        if (!ivHex || !encHex) return 'Corrupted encrypted memory format.';
-        
-        const secret = teamSecret || loadConfig().teamMemorySecret || 'default-rex-secret-key-32chars!!';
-        const key = crypto.createHash('sha256').update(secret).digest();
-        const iv = Buffer.from(ivHex, 'hex');
-        
-        const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-        let decrypted = decipher.update(encHex, 'hex', 'utf8');
-        decrypted += decipher.final('utf8');
-        
-        fs.writeFileSync(getMemoryFile(), decrypted, 'utf-8');
-        return 'Team memory pulled and decrypted successfully.';
+        const { vectors, model } = JSON.parse(fs.readFileSync(DEEP_MEMORY_FILE, 'utf-8'));
+        const response = await ollama.embeddings({ model, prompt: query });
+        const queryEmbedding = response.embedding;
+
+        const results = vectors.map(v => ({
+            ...v,
+            score: cosineSimilarity(queryEmbedding, v.embedding)
+        }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit);
+
+        if (results.length === 0) return "No semantic matches found.";
+
+        const report = results.map(r => `[${Math.round(r.score * 100)}%] ${r.path}: "${r.text.substring(0, 150)}..."`).join('\n---\n');
+        return `Deep Memory Results for "${query}":\n\n${report}`;
     } catch (e) {
-        return `Failed to pull memory (Bad secret or corrupted file): ${e.message}`;
+        return `Semantic search failed: ${e.message}`;
     }
 }

@@ -1,0 +1,22 @@
+{
+  "episodes": [
+    {
+      "id": "mn7rtt33e481nw",
+      "ts": "2026-03-26T17:53:27.423Z",
+      "source": "freefall",
+      "objective": "”Find bugs”",
+      "step": "start",
+      "success": true,
+      "resultText": "interval=120s batch=2 files=76"
+    },
+    {
+      "id": "mn7s08djxpr0tf",
+      "ts": "2026-03-26T17:58:27.175Z",
+      "source": "freefall",
+      "objective": "”Find bugs”",
+      "step": "stop",
+      "success": true,
+      "resultText": "Stopped via slash command"
+    }
+  ]
+}

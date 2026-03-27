@@ -26,11 +26,21 @@ export function saveTasks(tasks) {
 export async function scheduleTask() {
     p.note('Rex Automation Scheduler (v1.0)', 'Rex Agent');
     
-    const taskName = await p.text({ message: 'Task name:', placeholder: 'Backup source code' });
-    if (p.isCancel(taskName)) return;
+    const taskNameRaw = await p.text({ message: 'Task name:', placeholder: 'Backup source code' });
+    if (p.isCancel(taskNameRaw)) return;
+    const taskName = taskNameRaw.trim();
+    if (!taskName) {
+        p.log.warn('Task name cannot be empty.');
+        return;
+    }
 
-    const command = await p.text({ message: 'Shell command to run:', placeholder: 'git push origin main' });
-    if (p.isCancel(command)) return;
+    const commandRaw = await p.text({ message: 'Shell command to run:', placeholder: 'git push origin main' });
+    if (p.isCancel(commandRaw)) return;
+    const command = commandRaw.trim();
+    if (!command) {
+        p.log.warn('Shell command cannot be empty.');
+        return;
+    }
 
     const interval = await p.select({
         message: 'Repeat interval:',
@@ -55,8 +65,8 @@ export async function scheduleTask() {
     });
     saveTasks(tasks);
 
-    p.log.success(theme(`Task "${taskName}" scheduled successfully.`));
-    p.note(`Rex must be running in "daemon" mode for scheduled tasks to execute.`, 'Tip');
+    p.log.success(theme(`Task '${taskName}' scheduled successfully.`));
+    p.note(`Rex must be running in 'daemon' mode for scheduled tasks to execute.`, 'Tip');
 }
 
 export async function automationDaemon() {
@@ -82,7 +92,7 @@ export async function automationDaemon() {
                     task.lastRun = now;
                     changed = true;
                 } catch (e) {
-                    p.log.error(`Task "${task.name}" failed: ${e.message}`);
+                    p.log.error(`Task '${task.name}' failed: ${e.message}`);
                 }
             }
         }

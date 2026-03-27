@@ -10,8 +10,9 @@ export async function bootstrapMcpServers(config) {
         try {
             const transport = new StdioClientTransport({
                 command: serverConfig.command,
-                args: serverConfig.args || [],
-                env: { ...process.env, ...(serverConfig.env || {}) }
+                args: [...(serverConfig.args || [])],
+                env: { ...process.env, ...(serverConfig.env || {}) },
+                stderr: 'ignore' // This suppresses raw npm/server error logs
             });
 
             const client = new Client(
@@ -19,7 +20,10 @@ export async function bootstrapMcpServers(config) {
                 { capabilities: { prompts: {}, resources: {}, tools: {} } }
             );
 
-            await client.connect(transport);
+            // Connect with a timeout to prevent hanging on bad connections
+            const connectPromise = client.connect(transport);
+            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout connecting')), 10000));
+            await Promise.race([connectPromise, timeoutPromise]);
             
             const toolsResponse = await client.listTools();
             let toolCount = 0;
@@ -29,7 +33,7 @@ export async function bootstrapMcpServers(config) {
                     const argSchema = tool.inputSchema ? JSON.stringify(tool.inputSchema) : '';
                     dynamicTools.push({
                         name: `mcp_${name}_${tool.name}`,
-                        desc: `[MCP: ${name}] ${tool.description || tool.name}. Schema: \${argSchema}`,
+                        desc: `[MCP: ${name}] ${tool.description || tool.name}. Schema: ${argSchema}`,
                         action: async (args) => {
                             try {
                                 const res = await client.callTool({
@@ -37,21 +41,27 @@ export async function bootstrapMcpServers(config) {
                                     arguments: args
                                 });
                                 if (res.isError) {
-                                    return `MCP Tool Error: \${res.content.map(c => c.text).join('\\n')}`;
+                                    return `MCP Tool Error: ${res.content.map(c => c.text).join('\\n')}`;
                                 }
                                 return res.content.map(c => c.text).join('\\n');
                             } catch (err) {
-                                return `MCP Execution Exception: \${err.message}`;
+                                return `MCP Execution Exception: ${err.message}`;
                             }
                         }
                     });
                     toolCount++;
                 }
             }
-            console.log(`  \${pc.dim('Connected to MCP server:')} \${pc.cyan(name)} (\${toolCount} tools)`);
+            // Use a simple green dot indicator for success
+            process.stdout.write(`  ${pc.green('•')} ${name} `);
         } catch (e) {
-            console.log(`  \${pc.red(\`Failed to connect to MCP server "\${name}": \${e.message}\`)}`);
+            // Use a simple red dot indicator for failure, hiding the raw error
+            process.stdout.write(`  ${pc.red('•')} ${name} `);
         }
+    }
+    
+    if (Object.keys(servers).length > 0) {
+        process.stdout.write('\n');
     }
 
     return dynamicTools;
