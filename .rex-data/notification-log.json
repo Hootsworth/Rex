@@ -1,0 +1,38 @@
+{
+  "entries": [
+    {
+      "ts": "2026-03-30T08:03:03.673Z",
+      "urgency": "info",
+      "message": "Test notification from RexAI! 🦖",
+      "results": {
+        "discord": {
+          "ok": false,
+          "reason": "Discord webhook not configured"
+        }
+      }
+    },
+    {
+      "ts": "2026-03-30T08:03:15.571Z",
+      "urgency": "critical",
+      "message": "Test notification from RexAI! 🦖",
+      "results": {
+        "discord": {
+          "ok": false,
+          "reason": "Discord webhook not configured"
+        },
+        "telegram": {
+          "ok": false,
+          "reason": "Telegram bot token or chat ID not configured"
+        },
+        "toast": {
+          "ok": true,
+          "reason": ""
+        },
+        "email": {
+          "ok": false,
+          "reason": "SMTP not configured"
+        }
+      }
+    }
+  ]
+}

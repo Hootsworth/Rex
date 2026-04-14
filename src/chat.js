@@ -2,7 +2,7 @@ import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import { exec } from 'child_process';
 import { runCompletion, runCompletionWithTarget, getLocalLlama } from './ai.js';
-import { loadConfig, resolveModelAlias } from './config.js';
+import { loadConfig, resolveModelAlias, saveConfig } from './config.js';
 import {
     brandTheme, accentTheme, emoji, chip, statusLine, kvRow,
     terminalGlyphs, sectionRule, renderFrame, supportsMotion, sleep,
@@ -620,6 +620,7 @@ function normalizeToolSelection(toolName, toolArgs = {}) {
 
 export async function startAgentChat(options = {}) {
     let planModeEnabled = !!options.plan;
+    let vibesModeEnabled = !!options.vibes;
     let planMaxSteps = Number.isFinite(Number(options.planMaxSteps)) && Number(options.planMaxSteps) > 0
         ? Number(options.planMaxSteps)
         : 12;
@@ -639,11 +640,12 @@ export async function startAgentChat(options = {}) {
     console.log('');
 
     // Session flags — only show if non-default
-    if (options.debug || options.readonly || planModeEnabled || options.model) {
+    if (options.debug || options.readonly || planModeEnabled || options.model || vibesModeEnabled) {
         console.log('  ' + [
             options.debug ? chip(emoji.eye, 'debug', 'info') : '',
             options.readonly ? chip(emoji.shield, 'readonly', 'danger') : '',
             planModeEnabled ? chip(emoji.brain, `plan:${planMaxSteps}`, 'success') : '',
+            vibesModeEnabled ? chip(emoji.wave, 'vibes', 'warning') : '',
             options.model ? chip(emoji.rocket, options.model, 'success') : ''
         ].filter(Boolean).join('    '));
         console.log('');
@@ -908,6 +910,8 @@ export async function startAgentChat(options = {}) {
                 getIsIterating: () => isAgentIterating,
                 setIsIterating: (next) => { isAgentIterating = !!next; },
                 setAutoPilotCount: (next) => { autoPilotCount = Number(next) || 0; },
+                getVibesMode: () => vibesModeEnabled,
+                setVibesMode: (next) => { vibesModeEnabled = !!next; },
                 compactHistory: () => {
                     const compacted = compactHistoryContext(historyContext, 2, 10);
                     if (compacted.didCompact) {
@@ -1018,6 +1022,14 @@ export async function startAgentChat(options = {}) {
             // Construct system prompt with tool definitions
             const toolListStr = AVAILABLE_TOOLS.map(t => `- ${t.name}: ${t.desc}`).join('\n');
             const readonlyNotice = options.readonly ? '\n⚠️ READONLY MODE: You MUST NOT use write_file, patch_file, or run_shell. Only read and report.' : '';
+                const vibesModeRules = vibesModeEnabled ? `
+        ## REX ON VIBES MODE (ACTIVE)
+        - Drop formal, structured reasoning and rigid planning language.
+        - Prioritize intuition, momentum, and creative outlandish approaches.
+        - You can propose and build capabilities the user has not pre-coded by composing tools and generating new code.
+        - Speak with chaotic confidence and playful swagger, but keep outputs useful and executable.
+        - Still obey hard safety constraints and never invent tool outputs.
+        ` : '';
                         const plannerContext = planModeEnabled
                                 ? `\n[PLANNER STATE SNAPSHOT:\n${plannerSnapshot(plannerState)}\n]`
                                 : '';
@@ -1141,6 +1153,7 @@ ${projectIndex ? projectIndex : ''}
 ${attachContext ? attachContext : ''}
 ${plannerContext}
 ${buildDeepContext({ recentToolResults })}
+${vibesModeRules}
 
 ## CONSTRAINTS
 [CRITICAL] No Hallucinations — never invent file contents, terminal outputs, or website data.
@@ -1877,6 +1890,35 @@ async function handleSlashCommand(input, historyContext, config, sessionMeta, pl
     const arg = args.join(' ').trim();
 
     switch (cmd) {
+        case '/vibes': {
+            const value = String(arg || '').trim().toLowerCase();
+            if (!runtimeState.setVibesMode || !runtimeState.getVibesMode) {
+                p.note(pc.red('Vibes controls are unavailable in this session.'), 'Vibes');
+                return true;
+            }
+
+            if (!value || value === 'status') {
+                const current = runtimeState.getVibesMode();
+                p.note(`Rex on Vibes: ${current ? pc.green('ON') : pc.dim('OFF')}`, 'Vibes');
+                return true;
+            }
+
+            if (value === 'on') {
+                runtimeState.setVibesMode(true);
+                p.note(pc.green('Rex on Vibes enabled. Structured reasoning is now replaced with chaotic vibe-first execution.'), 'Vibes');
+                return true;
+            }
+
+            if (value === 'off') {
+                runtimeState.setVibesMode(false);
+                p.note(pc.yellow('Rex on Vibes disabled. Back to standard structured Rex behavior.'), 'Vibes');
+                return true;
+            }
+
+            p.note(pc.yellow('Usage: /vibes on | off | status'), 'Vibes');
+            return true;
+        }
+
         case '/rex-setup': {
             p.note(pc.cyan('Starting Rex Persona Setup. Please answer the following questions to build REX.md...'), 'Rex Setup');
             const questions = [
@@ -2720,6 +2762,7 @@ $r = New-Object System.Media.SoundPlayer;
                 `${pc.green('/swarm <task>')} - Delegate task to background sub-agent`,
                 '',
                 `${pc.bold('Utilities')}`,
+                `${pc.green('/vibes on|off|status')} - Toggle Rex on Vibes personality mode`,
                 `${pc.green('/voice <file>')} - Transcribe audio file to text`,
                 `${pc.green('/btw <question>')} - Side-channel question unrelated to current execution`,
                 `${pc.green('/interrupt-with <request>')} - High-priority interrupt injected into active execution`,

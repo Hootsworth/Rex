@@ -692,6 +692,14 @@ function appendAutonomousBrowserDebug(entry) {
     }
 }
 
+function shouldForceHeadlessInCi() {
+    const isCi = String(process.env.CI || '').toLowerCase() === 'true'
+        || String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true';
+    const isLinux = process.platform === 'linux';
+    const hasDisplay = !!process.env.DISPLAY || !!process.env.WAYLAND_DISPLAY;
+    return isCi && isLinux && !hasDisplay;
+}
+
 /**
  * Manages a persistent browser instance across multiple tool calls
  */
@@ -761,7 +769,7 @@ class BrowserManager {
 
     async ensureBrowser(opts = {}) {
         let justLaunched = false;
-        const isHeadless = !!opts.headless;
+        const isHeadless = !!opts.headless || shouldForceHeadlessInCi();
         if (this.browser && !this.browser.isConnected()) {
             this.browser = null;
             this.context = null;

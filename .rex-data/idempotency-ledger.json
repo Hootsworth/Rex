@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "values": [
+    {
+      "key": "legacy:1259891055520649279:1487509698700775536:read_file:{\"filePath\":\"/Downloads/module2.pdf\"}",
+      "value": "Failed to read file: ENOENT: no such file or directory, open 'C:\\Downloads\\module2.pdf'",
+      "updatedAt": "2026-03-28T17:52:36.613Z"
+    },
+    {
+      "key": "legacy:1259891055520649279:1487510708013891757:read_file:{\"filePath\":\"/Downloads/module2.pdf\"}",
+      "value": "Failed to read file: ENOENT: no such file or directory, open 'C:\\Downloads\\module2.pdf'",
+      "updatedAt": "2026-03-28T17:56:37.605Z"
+    },
+    {
+      "key": "legacy:1259891055520649279:1487510708013891757:run_shell:{\"command\":\"dir Downloads\"}",
+      "value": "Error: Command failed: dir Downloads\nFile Not Found\r\n\nStderr: File Not Found\r\n",
+      "updatedAt": "2026-03-28T17:56:38.540Z"
+    }
+  ],
+  "updatedAt": "2026-03-28T17:56:38.540Z"
+}

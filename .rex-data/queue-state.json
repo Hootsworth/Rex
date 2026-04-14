@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "leaseTtlMs": 120000,
+  "items": [
+    {
+      "id": "q_mnamof7j9hpn4k",
+      "actorId": "1259891055520649279",
+      "actionName": "read_file",
+      "idempotencyKey": "legacy:1259891055520649279:1487509698700775536:read_file:{\"filePath\":\"/Downloads/module2.pdf\"}",
+      "status": "completed",
+      "attemptCount": 1,
+      "leasedAt": "2026-03-28T17:52:36.609Z",
+      "leaseExpiresAt": "2026-03-28T17:54:36.609Z",
+      "lastError": "",
+      "createdAt": "2026-03-28T17:52:36.607Z",
+      "updatedAt": "2026-03-28T17:52:36.611Z"
+    },
+    {
+      "id": "q_mnamtl5s0s2hc4",
+      "actorId": "1259891055520649279",
+      "actionName": "read_file",
+      "idempotencyKey": "legacy:1259891055520649279:1487510708013891757:read_file:{\"filePath\":\"/Downloads/module2.pdf\"}",
+      "status": "completed",
+      "attemptCount": 1,
+      "leasedAt": "2026-03-28T17:56:37.601Z",
+      "leaseExpiresAt": "2026-03-28T17:58:37.601Z",
+      "lastError": "",
+      "createdAt": "2026-03-28T17:56:37.600Z",
+      "updatedAt": "2026-03-28T17:56:37.604Z"
+    },
+    {
+      "id": "q_mnamtlubch13w6",
+      "actorId": "1259891055520649279",
+      "actionName": "run_shell",
+      "idempotencyKey": "legacy:1259891055520649279:1487510708013891757:run_shell:{\"command\":\"dir Downloads\"}",
+      "status": "completed",
+      "attemptCount": 1,
+      "leasedAt": "2026-03-28T17:56:38.484Z",
+      "leaseExpiresAt": "2026-03-28T17:58:38.484Z",
+      "lastError": "",
+      "createdAt": "2026-03-28T17:56:38.483Z",
+      "updatedAt": "2026-03-28T17:56:38.539Z"
+    }
+  ],
+  "updatedAt": "2026-03-28T17:56:38.539Z"
+}

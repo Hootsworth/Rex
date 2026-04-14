@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { loadConfig, saveConfig, resolveModelAlias } from './config.js';
+import { loadConfig, saveConfig } from './config.js';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import OpenAI from 'openai';
@@ -123,12 +123,60 @@ export async function runCompletion(messages, signal = null, complexity = 'high'
     }
 
     const config = loadConfig();
-    const resolvedModel = resolveModelAlias(config.aiModel);
 
     // Ensure messages is in the correct format for role-based APIs
     const formattedMessages = Array.isArray(messages) ? messages : [{ role: 'user', content: messages }];
 
-    if (resolvedModel === 'openai') {
+    const runGemini = async () => {
+        if (!config.geminiKey) throw new Error('Gemini key is missing! Please configure it in Settings.');
+        if (signal?.aborted) throw new Error('Aborted');
+
+        const genAI = new GoogleGenerativeAI(config.geminiKey);
+        const allowedGeminiModels = new Set(['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite']);
+        const configuredGeminiModel = String(config.geminiModel || 'gemini-2.5-flash').trim();
+        const selectedGeminiModel = allowedGeminiModels.has(configuredGeminiModel)
+            ? configuredGeminiModel
+            : 'gemini-2.5-flash';
+        const model = genAI.getGenerativeModel({ model: selectedGeminiModel });
+
+        let systemInstruction = undefined;
+        const chatContents = [];
+
+        for (const m of formattedMessages) {
+            if (m.role === 'system') {
+                systemInstruction = { role: 'system', parts: [{ text: m.content }] };
+                continue;
+            }
+            let parts = [];
+            if (typeof m.content === 'string') {
+                parts = [{ text: m.content }];
+            } else if (Array.isArray(m.content)) {
+                parts = m.content.map((p) => {
+                    if (p.type === 'text') return { text: p.text };
+                    if (p.type === 'image_url') {
+                        const match = p.image_url.url.match(/^data:(image\/\w+);base64,(.+)$/);
+                        if (match) return { inlineData: { data: match[2], mimeType: match[1] } };
+                        return { text: `[Image unrenderable by Gemini: ${p.image_url.url}]` };
+                    }
+                    return { text: '' };
+                });
+            }
+            chatContents.push({ role: m.role === 'assistant' ? 'model' : 'user', parts });
+        }
+
+        const reqObj = { contents: chatContents };
+        if (systemInstruction) reqObj.systemInstruction = systemInstruction;
+
+        const resultPromise = model.generateContent(reqObj);
+        const abortPromise = signal ? new Promise((_, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('Aborted')), { once: true });
+        }) : null;
+
+        const result = abortPromise ? await Promise.race([resultPromise, abortPromise]) : await resultPromise;
+        return result.response.text();
+    };
+
+    const runOpenAI = async () => {
         if (!config.openaiKey) throw new Error('OpenAI key is missing! Please configure it in Settings.');
         const openai = getOpenAIClient(config.openaiKey);
         const allowedOpenAIModels = new Set(['gpt-5-nano', 'gpt-4o-mini', 'gpt-5-mini']);
@@ -142,101 +190,65 @@ export async function runCompletion(messages, signal = null, complexity = 'high'
             messages: formattedMessages,
         }, signal);
         return extractOpenAIText(response);
+    };
 
-    } else if (resolvedModel === 'deepseek') {
-        if (!config.deepseekKey) throw new Error('Deepseek key is missing! Please configure it in Settings.');
-        const deepseek = new OpenAI({ baseURL: 'https://api.deepseek.com', apiKey: config.deepseekKey });
-        const response = await deepseek.chat.completions.create({
-            model: 'deepseek-chat',
-            messages: formattedMessages,
-        }, { signal });
-        return response.choices[0].message.content;
-
-    } else if (resolvedModel === 'gemini') {
-        if (!config.geminiKey) throw new Error('Gemini key is missing! Please configure it in Settings.');
-        if (signal?.aborted) throw new Error('Aborted');
-        const genAI = new GoogleGenerativeAI(config.geminiKey);
-        const allowedGeminiModels = new Set(['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite']);
-        const configuredGeminiModel = String(config.geminiModel || 'gemini-2.5-flash').trim();
-        const selectedGeminiModel = allowedGeminiModels.has(configuredGeminiModel)
-            ? configuredGeminiModel
-            : 'gemini-2.5-flash';
-        const model = genAI.getGenerativeModel({ model: selectedGeminiModel });
-        
-        let systemInstruction = undefined;
-        const chatContents = [];
-        
-        for (const m of formattedMessages) {
-            if (m.role === 'system') {
-                systemInstruction = { role: 'system', parts: [{ text: m.content }] };
-                continue;
-            }
-            let parts = [];
-            if (typeof m.content === 'string') {
-                parts = [{ text: m.content }];
-            } else if (Array.isArray(m.content)) {
-                parts = m.content.map(p => {
-                    if (p.type === 'text') return { text: p.text };
-                    if (p.type === 'image_url') {
-                        const match = p.image_url.url.match(/^data:(image\/\w+);base64,(.+)$/);
-                        if (match) return { inlineData: { data: match[2], mimeType: match[1] } };
-                        return { text: `[Image unrenderable by Gemini: ${p.image_url.url}]` };
-                    }
-                    return { text: '' };
-                });
-            }
-            chatContents.push({ role: m.role === 'assistant' ? 'model' : 'user', parts });
-        }
-        
-        const reqObj = { contents: chatContents };
-        if (systemInstruction) reqObj.systemInstruction = systemInstruction;
-
-        // Wrap in abort-aware promise
-        const resultPromise = model.generateContent(reqObj);
-        const abortPromise = signal ? new Promise((_, reject) => {
-            signal.addEventListener('abort', () => reject(new Error('Aborted')), { once: true });
-        }) : null;
-        
-        const result = abortPromise ? await Promise.race([resultPromise, abortPromise]) : await resultPromise;
-        return result.response.text();
-
-    } else if (resolvedModel === 'claude') {
+    const runClaude = async () => {
         if (!config.claudeKey) throw new Error('Claude key is missing! Please configure it in Settings.');
         const anthropic = new Anthropic({ apiKey: config.claudeKey });
-        
-        // Separate system message for Anthropic
-        const systemMessage = formattedMessages.find(m => m.role === 'system')?.content || '';
-        const chatMessages = formattedMessages.filter(m => m.role !== 'system');
+
+        const systemMessage = formattedMessages.find((m) => m.role === 'system')?.content || '';
+        const chatMessages = formattedMessages.filter((m) => m.role !== 'system');
 
         const msg = await anthropic.messages.create({
-            model: 'claude-3-haiku-20240307',
+            model: String(config.claudeModel || 'claude-3-haiku-20240307'),
             max_tokens: 4096,
             system: systemMessage,
             messages: chatMessages
         }, { abortSignal: signal });
         return msg.content[0].text;
+    };
 
-    } else if (resolvedModel === 'local-llama') {
-        const lastUserMessage = formattedMessages.filter(m => m.role === 'user').pop()?.content || '';
+    const runDeepSeek = async () => {
+        if (!config.deepseekKey) throw new Error('Deepseek key is missing! Please configure it in Settings.');
+        const deepseek = new OpenAI({ baseURL: 'https://api.deepseek.com', apiKey: config.deepseekKey });
+        const response = await deepseek.chat.completions.create({
+            model: String(config.deepseekModel || 'deepseek-chat'),
+            messages: formattedMessages,
+        }, { signal });
+        return response.choices[0].message.content;
+    };
+
+    const runOllama = async () => {
+        const combinedPrompt = formattedMessages.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
+        const forceCpu = !!config.ollamaForceCpu || process.env.POWER_CLI_OLLAMA_FORCE_CPU === '1';
+        return await queryOllama(combinedPrompt, config.ollamaModel, signal, { forceCpu });
+    };
+
+    const runLocalLlama = async () => {
+        const lastUserMessage = formattedMessages.filter((m) => m.role === 'user').pop()?.content || '';
+        return await promptLocalLlamaWithRecovery(lastUserMessage, signal, config);
+    };
+
+    const providerPriority = [
+        { name: 'gemini', enabled: Boolean(config.geminiKey), run: runGemini },
+        { name: 'openai', enabled: Boolean(config.openaiKey), run: runOpenAI },
+        { name: 'claude', enabled: Boolean(config.claudeKey), run: runClaude },
+        { name: 'deepseek', enabled: Boolean(config.deepseekKey), run: runDeepSeek },
+        { name: 'ollama', enabled: true, run: runOllama },
+        { name: 'local-llama', enabled: true, run: runLocalLlama }
+    ];
+
+    let lastError = null;
+    for (const provider of providerPriority) {
+        if (!provider.enabled) continue;
         try {
-            return await promptLocalLlamaWithRecovery(lastUserMessage, signal, config);
+            return await provider.run();
         } catch (e) {
-            const allowOllamaFallback = config.localLlamaFallbackToOllama !== false;
-            if (!allowOllamaFallback) throw e;
-            const combinedPrompt = formattedMessages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
-            const forceCpu = !!config.ollamaForceCpu || process.env.POWER_CLI_OLLAMA_FORCE_CPU === '1';
-            return await queryOllama(combinedPrompt, config.ollamaModel, signal, { forceCpu });
-        }
-    } else {
-        // Use Ollama locally
-        try {
-            const combinedPrompt = formattedMessages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
-            const forceCpu = !!config.ollamaForceCpu || process.env.POWER_CLI_OLLAMA_FORCE_CPU === '1';
-            return await queryOllama(combinedPrompt, config.ollamaModel, signal, { forceCpu });
-        } catch (e) {
-            throw new Error(`Failed to run local model via Ollama: ${e.message}\nPlease ensure Ollama is installed.`);
+            lastError = e;
         }
     }
+
+    throw new Error(`No available model backend could complete the request. Last error: ${lastError?.message || 'unknown error'}`);
 }
 
 function isRecoverableLocalLlamaError(err) {

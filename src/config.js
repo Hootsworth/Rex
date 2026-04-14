@@ -13,7 +13,9 @@ const DEFAULT_CONFIG = {
   geminiKey: '',
   geminiModel: 'gemini-2.5-flash',
   claudeKey: '',
+  claudeModel: 'claude-3-haiku-20240307',
   deepseekKey: '',
+  deepseekModel: 'deepseek-chat',
   ollamaModel: 'llama3:latest', // Default model
   ollamaForceCpu: true,
   localLlamaForceCpu: true,
@@ -55,7 +57,19 @@ const DEFAULT_CONFIG = {
     path.join(os.homedir(), 'Downloads')
   ],
   voiceTranscriptionMode: 'openai',
-  whisperServiceUrl: ''
+  whisperServiceUrl: '',
+  // ─── Telegram Bot (opt-in via Labs) ───
+  telegramBotToken: '',
+  telegramAllowedUserIds: [],
+  telegramNotifyChatId: '',
+  // ─── Notification Router (opt-in via Labs) ───
+  notificationPriority: ['discord', 'telegram', 'toast'],
+  // ─── Mood Engine (opt-in via Labs) ───
+  moodEngineEnabled: false,
+  // ─── Daily Digest (opt-in via Labs) ───
+  dailyDigestEnabled: false,
+  dailyDigestTime: '09:00',
+  dailyDigestChannel: 'cli'
 };
 
 // Model aliases for quick switching

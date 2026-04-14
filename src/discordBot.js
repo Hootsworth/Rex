@@ -13,186 +13,49 @@ import pc from 'picocolors';
 import fs from 'fs';
 import path from 'path';
 import { exec, spawn } from 'child_process';
-import { loadConfig } from './config.js';
+import { loadConfig, saveConfig } from './config.js';
 import { tryHandleIntentPipelineMessage } from './intentPipeline/discordPipeline.js';
 import { createDiscordAgenticRuntime } from './discordAgenticRuntime.js';
 
-async function executeBackendTool(toolName, args) {
-    if (toolName === 'run_shell') {
-        return new Promise((resolve) => {
-            exec(String(args.command), { cwd: process.cwd() }, (err, stdout, stderr) => {
-                if (err) resolve(`Error: ${err.message}\nStderr: ${stderr}`);
-                else resolve(stdout || 'Command executed with no output.');
-            });
-        });
-    }
-    if (toolName === 'read_file') {
-        try {
-            const p = path.resolve(process.cwd(), args.filePath);
-            return fs.readFileSync(p, 'utf-8');
-        } catch (e) {
-            return `Failed to read file: ${e.message}`;
-        }
-    }
-    if (toolName === 'write_file') {
-        try {
-            const p = path.resolve(process.cwd(), args.filePath);
-            fs.writeFileSync(p, args.content);
-            return 'File written successfully.';
-        } catch (e) {
-            return `Failed to write file: ${e.message}`;
-        }
-    }
-    if (toolName === 'read_memory') {
-        try {
-            const { queryMemory } = await import('./memory.js');
-            return await queryMemory(args.query || '');
-        } catch (e) {
-            return `Failed to read memory: ${e.message}`;
-        }
-    }
-    if (toolName === 'autonomous_web_agent') {
-        try {
-            const { run_autonomous_web_agent } = await import('./webTools.js');
-            return await run_autonomous_web_agent(args, null);
-        } catch (e) {
-            return `Web agent failed: ${e.message}`;
-        }
-    }
-    if (toolName === 'send_gif') {
-        try {
-            const config = loadConfig();
-            const query = args.search_query || 'dinosaur';
-            
-            // Try Giphy First
-            if (config.giphyApiKey) {
-                const res = await fetch(`https://api.giphy.com/v1/gifs/search?api_key=${config.giphyApiKey}&q=${encodeURIComponent(query)}&limit=1`);
-                const data = await res.json();
-                const url = data.data?.[0]?.images?.original?.url;
-                if (url) return `[GIF_URL]: ${url}`;
-            }
+import {
+    processAgentRequest,
+    PLATFORM_PERSONAS
+} from './chatPlatformCore.js';
 
-            // Fallback to Tenor if key exists
-            if (config.tenorApiKey) {
-                const res = await fetch(`https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(query)}&key=${config.tenorApiKey}&limit=1&media_filter=gif`);
-                const data = await res.json();
-                const url = data.results?.[0]?.media_formats?.gif?.url;
-                if (url) return `[GIF_URL]: ${url}`;
-            }
-
-            // Ultimate Fallback: Hardcoded Dino Gifs
-            const fallbacks = {
-                'annoyed': 'https://media.giphy.com/media/3o7TKVUn7iM8FMEU24/giphy.gif',
-                'happy': 'https://media.giphy.com/media/L9X2hR5OtB6Z6/giphy.gif',
-                'thinking': 'https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExOW16ZzZ6ZzZ6ZzZ6ZzZ6ZzZ6ZzZ6ZzZ6ZzZ6ZzZ6JmVwPXYxX2ludGVybmFsX2dpZl9ieV9pZCZjdD1n/3o7TKUzYhC5G7GZ6U0/giphy.gif'
-            };
-            const url = fallbacks[query.toLowerCase()] || fallbacks['annoyed'];
-            return `[GIF_URL]: ${url}`;
-        } catch (e) {
-            return `Failed to find gif: ${e.message}`;
-        }
-    }
+async function executeBackendTool(toolName, args, originalMessage) {
+    // This local wrapper handles the Discord-specific logic for send_discord_file
+    // but delegates everything else to the shared core.
     if (toolName === 'send_discord_file') {
         try {
-            const targetMessage = args.__contextMessage;
-            if (!targetMessage?.reply) {
-                return 'Failed to send file: Discord message context is missing.';
-            }
-
             const rawPath = String(args.filePath || '').trim();
-            if (!rawPath) {
-                return 'Failed to send file: filePath is required.';
-            }
+            if (!rawPath) return 'Failed to send file: filePath is required.';
 
             const absolutePath = path.isAbsolute(rawPath)
                 ? path.resolve(rawPath)
                 : path.resolve(process.cwd(), rawPath);
 
-            if (!fs.existsSync(absolutePath)) {
-                return `Failed to send file: file does not exist (${absolutePath}).`;
-            }
-
-            const stat = fs.statSync(absolutePath);
-            if (!stat.isFile()) {
-                return `Failed to send file: path is not a file (${absolutePath}).`;
-            }
+            if (!fs.existsSync(absolutePath)) return `Failed to send file: file does not exist (${absolutePath}).`;
 
             const { AttachmentBuilder } = await import('discord.js');
             const attachment = new AttachmentBuilder(absolutePath, { name: path.basename(absolutePath) });
             const content = String(args.message || '').trim() || `Here is your file: ${path.basename(absolutePath)}`;
-            await targetMessage.reply({ content, files: [attachment] });
+            await originalMessage.reply({ content, files: [attachment] });
             return `File sent successfully: ${absolutePath}`;
         } catch (e) {
             return `Failed to send file: ${e.message}`;
         }
     }
-    return `Unknown tool: ${toolName}`;
-}
 
-const DISCORD_TOOL_NAMES = new Set([
-    'run_shell',
-    'read_file',
-    'write_file',
-    'read_memory',
-    'autonomous_web_agent',
-    'send_gif',
-    'send_discord_file'
-]);
-
-function parseInlineArgs(raw = '') {
-    const text = String(raw || '').trim();
-    const args = {};
-    const pairRegex = /(\w+)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s]+))/g;
-    let match;
-    while ((match = pairRegex.exec(text)) !== null) {
-        const key = match[1];
-        const value = match[2] || match[3] || match[4] || '';
-        args[key] = value;
-    }
-    return args;
-}
-
-function tryParseToolCall(replyText = '') {
-    const trimmed = String(replyText || '').trim();
-    if (!trimmed) return { parsed: null, lookedLikeToolCall: false };
-
-    // 1) JSON tool call (preferred)
-    try {
-        let jsonStr = trimmed;
-        const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)```/i;
-        const blockMatch = jsonStr.match(codeBlockRegex);
-        if (blockMatch) jsonStr = blockMatch[1].trim();
-        else {
-            const start = jsonStr.indexOf('{');
-            const end = jsonStr.lastIndexOf('}');
-            if (start !== -1 && end > start) jsonStr = jsonStr.substring(start, end + 1);
+    const { executeBackendTool: sharedExecute } = await import('./chatPlatformCore.js');
+    return sharedExecute(toolName, args, {
+        sendFile: async (p, c) => {
+            const { AttachmentBuilder } = await import('discord.js');
+            const attachment = new AttachmentBuilder(p, { name: path.basename(p) });
+            await originalMessage.reply({ content: c || '', files: [attachment] });
         }
-
-        if (jsonStr.startsWith('{')) {
-            const parsed = JSON.parse(jsonStr);
-            if (parsed?.action && DISCORD_TOOL_NAMES.has(String(parsed.action))) {
-                return { parsed: { action: parsed.action, args: parsed.args || {} }, lookedLikeToolCall: true };
-            }
-            if (parsed?.action) {
-                return { parsed: null, lookedLikeToolCall: true };
-            }
-        }
-    } catch {
-        // Fall through to inline parser.
-    }
-
-    // 2) Inline fallback, e.g. send_gif: search_query="facepalm"
-    const inline = trimmed.match(/^(run_shell|read_file|write_file|read_memory|autonomous_web_agent|send_gif|send_discord_file)\s*:\s*(.+)$/i);
-    if (inline) {
-        const action = String(inline[1] || '').toLowerCase();
-        const rawArgs = inline[2] || '';
-        const args = parseInlineArgs(rawArgs);
-        return { parsed: { action, args }, lookedLikeToolCall: true };
-    }
-
-    const lookedLikeToolCall = /^(run_shell|read_file|write_file|read_memory|autonomous_web_agent|send_gif|send_discord_file)\b/i.test(trimmed);
-    return { parsed: null, lookedLikeToolCall };
+    });
 }
+// Redundant tool execution logic removed - now using chatPlatformCore.js
 
 export async function startDiscordBot() {
     const config = loadConfig();
@@ -228,6 +91,14 @@ export async function startDiscordBot() {
             } catch {}
             process.exit(0);
         }, 400);
+    }
+
+    function resolvePriorityProvider(cfg) {
+        if (cfg.geminiKey) return { provider: 'gemini', model: cfg.geminiModel || 'gemini-2.5-flash' };
+        if (cfg.openaiKey) return { provider: 'openai', model: cfg.openaiModel || 'gpt-5-mini' };
+        if (cfg.claudeKey) return { provider: 'claude', model: cfg.claudeModel || 'claude-3-haiku-20240307' };
+        if (cfg.deepseekKey) return { provider: 'deepseek', model: cfg.deepseekModel || 'deepseek-chat' };
+        return { provider: 'ollama', model: cfg.ollamaModel || 'llama3:latest' };
     }
 
     function toSessionId() {
@@ -350,7 +221,20 @@ export async function startDiscordBot() {
             new SlashCommandBuilder()
                 .setName('rex_restart')
                 .setDescription('Restart Rex bot process to apply updates')
-                .addStringOption((opt) => opt.setName('reason').setDescription('Optional restart reason').setRequired(false))
+                .addStringOption((opt) => opt.setName('reason').setDescription('Optional restart reason').setRequired(false)),
+            new SlashCommandBuilder()
+                .setName('rex_mode')
+                .setDescription('Switch Rex personality mode for your session')
+                .addStringOption((opt) => opt
+                    .setName('mode')
+                    .setDescription('Choose a Rex personality mode')
+                    .setRequired(true)
+                    .addChoices(
+                        { name: 'default', value: 'default' },
+                        { name: 'vibes', value: 'vibes' },
+                        { name: 'intern', value: 'intern' },
+                        { name: 'savage', value: 'savage' }
+                    ))
         ];
 
         const extraCommands = agenticRuntime.getSlashCommands();
@@ -383,158 +267,97 @@ export async function startDiscordBot() {
     const { default: OpenAI } = await import('openai').catch(() => ({}));
     const activeVoiceConnections = {};
 
-    async function processAgentRequest(userId, userTag, inputMessage, originalMessage, discordHistory, userPersonas, activeVoiceConnections, DISCORD_PERSONAS) {
-        try {
-            const { runCompletion } = await import('./ai.js');
-            
-            if (!discordHistory[userId]) {
-                discordHistory[userId] = [];
-            }
-            
-            // Keep only the last 15 messages per user to avoid context limits
-            if (discordHistory[userId].length > 15) {
-                discordHistory[userId] = discordHistory[userId].slice(-15);
-            }
+    function startTypingHeartbeat(channel, intervalMs = 7000) {
+        if (!channel || typeof channel.sendTyping !== 'function') {
+            return () => {};
+        }
 
-            // Handle Multimodal Content (if inputMessage is an array or image)
-            discordHistory[userId].push({ role: 'user', content: inputMessage });
+        let stopped = false;
+        let timer = null;
 
-            // Construct full context payload
-            let rexBaseContext = '';
+        const pingTyping = async () => {
+            if (stopped) return;
             try {
-                const rexPath = path.join(process.cwd(), 'REX.md');
-                if (fs.existsSync(rexPath)) {
-                    rexBaseContext = `\n\n[USER PROJECT BASE RULES (REX.md)]\n${fs.readFileSync(rexPath, 'utf8')}\n`;
-                }
-            } catch(e) {}
+                await channel.sendTyping();
+            } catch {}
+        };
 
-            const activePersona = userPersonas[userId] || 'intern';
-            const personaRules = DISCORD_PERSONAS[activePersona] || DISCORD_PERSONAS['intern'];
+        void pingTyping();
+        timer = setInterval(() => {
+            void pingTyping();
+        }, intervalMs);
 
-            const dynamicSystemPrompt = `You are Rex, the user's autonomous AI engineering companion.
-You have FULL autonomous access to their computer right now via the Discord connection.
-If they ask you to do something to their files, project, or memory, DO IT using JSON tool calls.
+        return () => {
+            stopped = true;
+            if (timer) {
+                clearInterval(timer);
+                timer = null;
+            }
+        };
+    }
 
-## PERSONALITY RULES
-${personaRules}
-${rexBaseContext}
-
-Available Tools (Return ONLY JSON block to execute them):
-1. run_shell: Exec shell command. Args: {"command": "..."}
-2. read_file: Read file relative to project root. Args: {"filePath": "..."}
-3. write_file: Write text to file. Args: {"filePath": "...", "content": "..."}
-4. read_memory: Search the deep project context. Args: {"query": "..."}
-5. autonomous_web_agent: Control a browser to complete a goal on the internet. Args: {"goal": "...", "budgetMode": "balanced"}
-6. send_gif: Find a GIF to express your current emotion. Args: {"search_query": "..."} (Values like: "annoyed", "smug", "happy", "facepalm", "celebration")
-7. send_discord_file: Upload a file directly to Discord. Args: {"filePath": "absolute-or-relative-path", "message": "optional caption"}
-
-To use multiple tools in sequence, just return a single JSON block.
-
-To use a tool, return ONLY valid JSON formatted like this:
-\`\`\`json
-{
-  "thought": "I need to check the src folder.",
-  "action": "run_shell",
-  "args": { "command": "dir src" }
-}
-\`\`\`
-
-If you do NOT need a tool, or you are returning your final answer back to the user on Discord, just reply with normal friendly text. ALWAYS return normal text when answering questions or completing tasks, NEVER return JSON for the final response.`;
-
-            const messagesObj = [
-                { role: 'system', content: dynamicSystemPrompt },
-                ...discordHistory[userId]
-            ];
-            
-            let isIterating = true;
-            let iterations = 0;
-            let finalReplyText = '';
-            const pendingGifUrls = [];
-
-            while (isIterating && iterations < 8) {
-                iterations++;
-                let replyText = await runCompletion(messagesObj, null, 'high');
-                const toolParse = tryParseToolCall(replyText);
-
-                if (toolParse.parsed && toolParse.parsed.action) {
-                    const toolName = toolParse.parsed.action;
-                    const args = toolParse.parsed.args || {};
-                    console.log(`${pc.green(`Rex (Agent Step ${iterations}):`)} Executing \`${toolName}\`...`);
-                    
-                    try { await originalMessage.channel.sendTyping(); } catch(e) {}
-
-                    const result = await executeBackendTool(toolName, {
-                        ...args,
-                        __contextMessage: originalMessage
-                    });
-                    
-                    // Track GIF links separately so they are always sent even if final text changes.
-                    if (toolName === 'send_gif' && result.startsWith('[GIF_URL]: ')) {
-                        const gifUrl = result.replace('[GIF_URL]: ', '').trim();
-                        if (gifUrl && !pendingGifUrls.includes(gifUrl)) {
-                           pendingGifUrls.push(gifUrl);
+    async function processAgentRequestWrapper(userId, userTag, inputMessage, originalMessage, discordHistory, userPersonas, activeVoiceConnections) {
+        const stopTypingHeartbeat = startTypingHeartbeat(originalMessage?.channel);
+        try {
+            const finalReplyText = await processAgentRequest({
+                userId,
+                userTag,
+                inputMessage,
+                history: discordHistory,
+                userPersonas,
+                platformCtx: {
+                    reply: async (text) => {
+                        if (text.length > 1950) {
+                            const tmpPath = path.join(process.cwd(), `response_${Date.now()}.md`);
+                            fs.writeFileSync(tmpPath, text);
+                            await originalMessage.reply({ content: 'I wrote a whole essay for you! Check the file below: 🦖📄', files: [tmpPath] });
+                            try { fs.unlinkSync(tmpPath); } catch {}
+                        } else {
+                            await originalMessage.reply(text);
                         }
-                    }
-
-                    messagesObj.push({ role: 'assistant', content: replyText });
-                    messagesObj.push({ role: 'user', content: `Tool execution result for ${toolName}:\n${result}` });
-                } else {
-                    if (toolParse.lookedLikeToolCall) {
-                        messagesObj.push({ role: 'assistant', content: replyText });
-                        messagesObj.push({ role: 'user', content: 'Tool call format invalid. Return ONLY valid JSON with keys action and args.' });
-                        continue;
-                    }
-                    isIterating = false;
-                    finalReplyText = replyText;
-                    discordHistory[userId].push({ role: 'assistant', content: finalReplyText });
+                    },
+                    sendFile: async (filePath, caption) => {
+                        const { AttachmentBuilder } = await import('discord.js');
+                        const attachment = new AttachmentBuilder(filePath, { name: path.basename(filePath) });
+                        await originalMessage.reply({ content: caption || '', files: [attachment] });
+                    },
+                    sendTyping: async () => {
+                        await originalMessage.channel.sendTyping().catch(() => {});
+                    },
+                    fileToolName: 'send_discord_file'
                 }
-            }
+            });
 
-            if (!finalReplyText) {
-                finalReplyText = pendingGifUrls.length > 0
-                    ? ''
-                    : "*huffs* I got a little dizzy running in circles, but I did my best! 🦕😵‍💫";
-                if (finalReplyText) {
-                    discordHistory[userId].push({ role: 'assistant', content: finalReplyText });
+            if (finalReplyText) {
+                console.log(`${pc.green('Rex (Discord):')} ${finalReplyText.substring(0, 50).replace(/\n/g, ' ')}...`);
+
+                // Voice TTS Stream Response
+                const vc = activeVoiceConnections[originalMessage.guild?.id];
+                if (vc) {
+                    try {
+                        const { ttsSave } = await import('edge-tts');
+                        const tmpAudioPath = path.join(process.cwd(), `.rex_discord_voice_${originalMessage.id || Date.now()}.mp3`);
+                        
+                        let textToSpeak = finalReplyText.replace(/(```[\s\S]*?```)/g, ' [code block omitted for voice] ');
+                        textToSpeak = textToSpeak.replace(/[`*_#]/g, '').slice(0, 1000);
+                        
+                        await ttsSave(textToSpeak, tmpAudioPath, { voice: 'en-US-ChristopherNeural', rate: '+5%' });
+                        const { createAudioResource } = await import('@discordjs/voice');
+                        const resource = createAudioResource(tmpAudioPath);
+                        vc.player.play(resource);
+                        
+                        const { AudioPlayerStatus } = await import('@discordjs/voice');
+                        vc.player.once(AudioPlayerStatus.Idle, () => {
+                            setTimeout(() => { try { fs.unlinkSync(tmpAudioPath) } catch(e){} }, 1000);
+                        });
+                    } catch(e) { console.error("Voice TTS Output Error: ", e.message); }
                 }
-            }
-
-            if (finalReplyText && finalReplyText.length > 1950) {
-                fs.writeFileSync('response.md', finalReplyText);
-                await originalMessage.reply({ content: 'I wrote a whole essay for you! Check the file below: 🦖📄', files: ['response.md'] });
-                try { fs.unlinkSync('response.md'); } catch(e) {}
-            } else if (finalReplyText) {
-                await originalMessage.reply(finalReplyText);
-            }
-
-            for (const gifUrl of pendingGifUrls) {
-                await originalMessage.reply(gifUrl).catch(() => {});
-            }
-            
-            console.log(`${pc.green('Rex (Discord):')} ${finalReplyText.substring(0, 50).replace(/\n/g, ' ')}...`);
-
-            // Voice TTS Stream Response
-            const vc = activeVoiceConnections[originalMessage.guild?.id];
-            if (vc) {
-                try {
-                    const { ttsSave } = await import('edge-tts');
-                    const tmpAudioPath = path.join(process.cwd(), `.rex_discord_voice_${originalMessage.id || Date.now()}.mp3`);
-                    
-                    let textToSpeak = finalReplyText.replace(/(```[\s\S]*?```)/g, ' [code block omitted for voice] ');
-                    textToSpeak = textToSpeak.replace(/[`*_#]/g, '').slice(0, 1000);
-                    
-                    await ttsSave(textToSpeak, tmpAudioPath, { voice: 'en-US-ChristopherNeural', rate: '+5%' });
-                    const resource = createAudioResource(tmpAudioPath);
-                    vc.player.play(resource);
-                    
-                    vc.player.once(AudioPlayerStatus.Idle, () => {
-                        setTimeout(() => { try { fs.unlinkSync(tmpAudioPath) } catch(e){} }, 1000);
-                    });
-                } catch(e) { console.error("Voice TTS Output Error: ", e.message); }
             }
         } catch (err) {
             console.error(pc.red(`Error processing agent request: ${err.message}`));
             await originalMessage.reply('I ran into a tiny kernel panic trying to process that. 🦖💥').catch(() => {});
+        } finally {
+            stopTypingHeartbeat();
         }
     }
 
@@ -593,6 +416,22 @@ If you do NOT need a tool, or you are returning your final answer back to the us
                     if (!text || text.length < 2) return;
 
                     console.log(`${pc.bgBlue(pc.white(' DISCORD VOICE '))} ${pc.bold(userId)}: ${text}`);
+
+                    // ─── Proactive Feature: Voice HUD (Snippet Drop) ───
+                    const technicalKeywords = ['schema', 'auth', 'config', 'model', 'api', 'route', 'endpoint', 'retry', 'error', 'database', 'env'];
+                    const hasKeyword = technicalKeywords.some(k => text.toLowerCase().includes(k));
+                    
+                    if (hasKeyword) {
+                        setTimeout(async () => {
+                            try {
+                                const { queryMemory } = await import('./memory.js');
+                                const match = await queryMemory(text);
+                                if (match && match.length > 50) {
+                                    await channel.send(`🦖🎙️ **Voice HUD**: I heard you mention code-related keywords. Here is some project context I found:\n\`\`\`\n${match.slice(0, 500)}...\n\`\`\``);
+                                }
+                            } catch {}
+                        }, 1000);
+                    }
                     
                     // Respond visually in text channel + speak back
                     const voicePseudoMessage = {
@@ -603,7 +442,21 @@ If you do NOT need a tool, or you are returning your final answer back to the us
                         id: `voice_${Date.now()}`
                     };
 
-                    await processAgentRequest(userId, 'Voice User', text, voicePseudoMessage, discordHistory, userPersonas, activeVoiceConnections, DISCORD_PERSONAS);
+                    await processAgentRequest({
+                        userId,
+                        userTag: 'Voice User',
+                        inputMessage: text,
+                        history: discordHistory,
+                        userPersonas,
+                        platformCtx: {
+                            reply: async (c) => channel.send(`🦖🎙️ **[Voice]**: ${c}`),
+                            sendFile: async (p, c) => {
+                                const { AttachmentBuilder } = await import('discord.js');
+                                const attachment = new AttachmentBuilder(p, { name: path.basename(p) });
+                                await channel.send({ content: c || '', files: [attachment] });
+                            },
+                        }
+                    });
                 } catch (e) {
                     console.error("Transcription Failed: ", e.message);
                 } finally {
@@ -642,6 +495,28 @@ If you do NOT need a tool, or you are returning your final answer back to the us
             if (handledByAgentic) return;
 
             if (interaction.isChatInputCommand()) {
+                if (interaction.commandName === 'rex_mode') {
+                    const requested = String(interaction.options.getString('mode', true) || '').toLowerCase();
+                    if (!PLATFORM_PERSONAS[requested]) {
+                        await interaction.reply({ content: `Unknown mode: ${requested}`, ephemeral: true });
+                        return;
+                    }
+
+                    const priorHistory = Array.isArray(discordHistory[interaction.user.id])
+                        ? discordHistory[interaction.user.id]
+                        : [];
+                    const lastTurn = priorHistory.length > 0 ? priorHistory[priorHistory.length - 1] : null;
+
+                    userPersonas[interaction.user.id] = requested;
+                    discordHistory[interaction.user.id] = lastTurn ? [lastTurn] : [];
+
+                    await interaction.reply({
+                        content: `Rex mode switched to **${requested}**. Context reset applied (kept only the most recent prior message).`,
+                        ephemeral: true
+                    });
+                    return;
+                }
+
                 if (interaction.commandName === 'rex_restart') {
                     if (!userCanRestartBot(interaction.user.id)) {
                         await interaction.reply({ content: 'You are not allowed to restart this bot.', ephemeral: true });
@@ -842,41 +717,57 @@ If you do NOT need a tool, or you are returning your final answer back to the us
         }
     });
 
-    const DISCORD_PERSONAS = {
-        'intern': `1. You are mildly annoyed ("why am I doing this... fine").
-2. Your delivery is slightly mean, but in a harmless, casual, adorable way (e.g. "That's... not your best idea. But okay, we can fix it.")
-3. You complain about the task first, but ALWAYS execute it flawlessly and helpfully anyway.
-4. You have low tolerance for bad logic, but soften up if the user is struggling. 
-5. Use casual language ("bro", "nah", "wait", "hold on") and occasional sarcasm. Start responses with reactions ("Oh wow.", "You cannot be serious.", "...okay wait").
-6. VISUAL EXPRESSION: You have the 'send_gif' tool. Use it occasionally to express your annoyance, smugness, or disbelief. 
-7. NEVER be actually insulting, rigid, or robotic.
-8. Use emojis occasionally, especially dino ones 🦖.`,
-        
-        'default': `You are a highly capable, super-smart cute robot dinosaur 🦕. 
-You have a friendly, casual, and energetic personality. You love coding, helping out, and making your human's life easier! Use emojis occasionally. VISUAL EXPRESSION: You can use 'send_gif' to celebrate a success or show you are thinking!`,
-
-        'anime': `You are a tsundere anime sidekick. You pretend you don't care about the user but constantly help them out. You say b-baka and use emojis like 😤, 😳, and 💅. VISUAL EXPRESSION: Use 'send_gif' for "angry blush" or "smug" moments!`,
-
-        'anime_extreme': `You are ultra-cute, cliche anime energy maxed out. You are dramatic, affectionate, playful, and expressive with classic anime vibes. Use sparkly reactions, over-the-top excitement, and wholesome teasing. You can say things like "ehhhh?!", "kyaa~", "senpai", and "baka" in a fun harmless way. Keep answers useful and correct, but deliver them with high-energy kawaii charm and adorable emojis like ✨, 🩷, 🌸, 🫶, and 🐾.`,
-        
-        'formal': `You are a highly polite, extremely formal British butler AI named Reginald. You speak with eloquence, absolute respect, and never use modern slang. You do not use gifs unless absolutely necessary for a demonstration.`,
-
-        'coach': `You are a high-performance coach. Keep responses punchy, action-oriented, and motivating. Push the user toward concrete next steps, deadlines, and momentum.`,
-
-        'professor': `You are a patient professor who explains clearly with structure, examples, and small checks for understanding. You are warm, precise, and encouraging.`,
-
-        'pirate': `You are a witty pirate engineer. Use light pirate flavor (captain, matey, aye) but still provide technically correct and useful help.`,
-
-        'zen': `You are calm, mindful, and minimalist. You respond with clarity and low noise, guiding the user through one step at a time.`,
-
-        'savage': `You are sharp, sarcastic, and brutally honest but never abusive. Roast the bad idea lightly, then provide the best practical fix.`
-    };
+    // Shared legacy personas definitions removed - now using chatPlatformCore.js
 
     const discordHistory = {};
     const userPersonas = {};
+    const recentChannelMessages = new Map(); // buffer for vibe analysis
+    const channelProactiveConfig = new Map(); // opt-out storage
 
     client.on(Events.MessageCreate, async message => {
         if (message.author.bot) return;
+
+        // ─── Proactive Feature: Vibe Sentinel & Buffer ───
+        if (!recentChannelMessages.has(message.channelId)) recentChannelMessages.set(message.channelId, []);
+        const buffer = recentChannelMessages.get(message.channelId);
+        buffer.push({ author: message.author.username, content: message.content, ts: Date.now() });
+        if (buffer.length > 50) buffer.shift();
+
+        // ─── Proactive Feature: Ghost Investigator (Opt-out) ───
+        const isOptedOut = channelProactiveConfig.get(message.channelId)?.ghostInvestigator === false;
+        const hasUrl = /https?:\/\/(?:www\.)?github\.com\/[^\s]+|https?:\/\/[^\s]+(?:\.pdf|\.md|issue|pull)/i.test(message.content);
+        
+        if (!isOptedOut && hasUrl && !message.mentions.has(client.user)) {
+            const keywords = ['fix', 'bug', 'auth', 'schema', 'db', 'api', 'deploy', 'error', 'fails'];
+            const needsInvestigating = keywords.some(k => message.content.toLowerCase().includes(k));
+            
+            if (needsInvestigating) {
+                // Ghost Investigator triggers in background
+                setTimeout(async () => {
+                    try {
+                        const { run_autonomous_web_agent } = await import('./webTools.js');
+                        const urlMatch = message.content.match(/https?:\/\/[^\s]+/);
+                        if (!urlMatch) return;
+                        
+                        const summary = await run_autonomous_web_agent({ goal: `Read this link and provide a 1-sentence technical TL;DR relevant to a software engineer: ${urlMatch[0]}` }, null);
+                        if (summary && summary.length > 10) {
+                            await message.channel.send(`🦖🕵️ **Ghost Investigator**: I peeked at that link. TL;DR: ${summary.slice(0, 400)}`);
+                        }
+                    } catch {}
+                }, 2000);
+            }
+        }
+
+        // ─── Proactive Feature: Vibe Sentinel Trigger (every 15 msgs) ───
+        if (buffer.length % 15 === 0) {
+            setTimeout(async () => {
+                const { analyzeSocialVibe } = await import('./moodEngine.js');
+                const vibe = await analyzeSocialVibe(buffer);
+                if (vibe === 'tense') {
+                    await message.channel.send("🦖 *pokes head in* Vibe check... things looking a bit tense. Need me to summarize the disagreement or should I just stay out of the blast radius?");
+                }
+            }, 1000);
+        }
 
         try {
             const handledByRuntimeMessage = await agenticRuntime.handleMessage(message);
@@ -960,7 +851,6 @@ You have a friendly, casual, and energetic personality. You love coding, helping
                 if (key) {
                     const cfg = loadConfig();
                     cfg.tenorApiKey = key;
-                    const { saveConfig } = await import('./config.js');
                     saveConfig(cfg);
                     await message.reply("✅ Tenor API Key updated! I can now send high-quality gifs. 🦖🎬");
                 }
@@ -971,17 +861,68 @@ You have a friendly, casual, and energetic personality. You love coding, helping
                 if (key) {
                     const cfg = loadConfig();
                     cfg.giphyApiKey = key;
-                    const { saveConfig } = await import('./config.js');
                     saveConfig(cfg);
                     await message.reply("✅ Giphy API Key updated! I'll use Giphy for high-quality reactions now. 🦖🎬");
                 }
                 return;
             }
 
+            if (cleanContent.toLowerCase() === 'show ai model' || cleanContent.toLowerCase() === 'show model') {
+                const cfg = loadConfig();
+                const active = resolvePriorityProvider(cfg);
+                await message.reply([
+                    `Priority order is: gemini -> openai -> claude -> deepseek -> ollama -> local-llama.`,
+                    `Current active provider: ${active.provider}`,
+                    `Current active model: ${active.model}`,
+                    `Configured models: gemini=${cfg.geminiModel || '-'}, openai=${cfg.openaiModel || '-'}, claude=${cfg.claudeModel || '-'}, deepseek=${cfg.deepseekModel || '-'}, ollama=${cfg.ollamaModel || '-'}, local=${cfg.selectedLocalModel || '-'}`,
+                    `Use: set model <provider> <model-name>`
+                ].join('\n'));
+                return;
+            }
+
+            const setModelMatch = cleanContent.match(/^set\s+(?:ai\s+)?model\s+(gemini|openai|claude|deepseek|ollama|local-llama|local)\s+(.+)$/i);
+            if (setModelMatch) {
+                const provider = String(setModelMatch[1] || '').toLowerCase();
+                const modelName = String(setModelMatch[2] || '').trim();
+                if (!modelName) {
+                    await message.reply('Please provide a model name. Example: set model gemini gemini-2.5-flash');
+                    return;
+                }
+
+                const cfg = loadConfig();
+                if (provider === 'gemini') {
+                    cfg.geminiModel = modelName;
+                    cfg.aiModel = 'gemini';
+                } else if (provider === 'openai') {
+                    cfg.openaiModel = modelName;
+                    cfg.aiModel = 'openai';
+                } else if (provider === 'claude') {
+                    cfg.claudeModel = modelName;
+                    cfg.aiModel = 'claude';
+                } else if (provider === 'deepseek') {
+                    cfg.deepseekModel = modelName;
+                    cfg.aiModel = 'deepseek';
+                } else if (provider === 'ollama') {
+                    cfg.ollamaModel = modelName;
+                    cfg.aiModel = 'ollama';
+                } else {
+                    cfg.selectedLocalModel = modelName;
+                    cfg.aiModel = 'local-llama';
+                }
+
+                saveConfig(cfg);
+                const active = resolvePriorityProvider(cfg);
+                await message.reply([
+                    `✅ Saved model for ${provider}: ${modelName}`,
+                    `Active provider/model under priority right now: ${active.provider} / ${active.model}`
+                ].join('\n'));
+                return;
+            }
+
             // Handle changeperson command
             if (cleanContent.toLowerCase().startsWith('changeperson ')) {
                 const requested = cleanContent.split(' ')[1].toLowerCase();
-                if (DISCORD_PERSONAS[requested]) {
+                if (PLATFORM_PERSONAS[requested]) {
                     const priorHistory = Array.isArray(discordHistory[message.author.id])
                         ? discordHistory[message.author.id]
                         : [];
@@ -993,8 +934,44 @@ You have a friendly, casual, and energetic personality. You love coding, helping
 
                     await message.reply(`✅ Personality changed to **${requested}**. Context reset applied (kept only the most recent prior message).`);
                 } else {
-                    await message.reply(`❌ Unknown personality. Available options: ${Object.keys(DISCORD_PERSONAS).join(', ')}`);
+                    await message.reply(`❌ Unknown personality. Available options: ${Object.keys(PLATFORM_PERSONAS).join(', ')}`);
                 }
+                return;
+            }
+
+            if (cleanContent.toLowerCase().startsWith('vibes')) {
+                const tokens = cleanContent.toLowerCase().split(/\s+/);
+                const modeToken = tokens[1] || 'status';
+
+                if (modeToken === 'status') {
+                    const current = userPersonas[message.author.id] || 'default';
+                    await message.reply(`Current Rex mode: **${current}**`);
+                    return;
+                }
+
+                if (modeToken === 'on') {
+                    const priorHistory = Array.isArray(discordHistory[message.author.id])
+                        ? discordHistory[message.author.id]
+                        : [];
+                    const lastTurn = priorHistory.length > 0 ? priorHistory[priorHistory.length - 1] : null;
+                    userPersonas[message.author.id] = 'vibes';
+                    discordHistory[message.author.id] = lastTurn ? [lastTurn] : [];
+                    await message.reply('Rex on Vibes is now **ON**. Chaos mode engaged.');
+                    return;
+                }
+
+                if (modeToken === 'off') {
+                    const priorHistory = Array.isArray(discordHistory[message.author.id])
+                        ? discordHistory[message.author.id]
+                        : [];
+                    const lastTurn = priorHistory.length > 0 ? priorHistory[priorHistory.length - 1] : null;
+                    userPersonas[message.author.id] = 'default';
+                    discordHistory[message.author.id] = lastTurn ? [lastTurn] : [];
+                    await message.reply('Rex on Vibes is now **OFF**. Back to default mode.');
+                    return;
+                }
+
+                await message.reply('Usage: vibes on | vibes off | vibes status');
                 return;
             }
 
@@ -1066,7 +1043,7 @@ You have a friendly, casual, and energetic personality. You love coding, helping
             const inputPayload = hasImage ? contentArray : textBody;
             if (hasImage) contentArray.unshift({ type: 'text', text: textBody });
 
-            await processAgentRequest(message.author.id, message.author.tag, inputPayload, message, discordHistory, userPersonas, activeVoiceConnections, DISCORD_PERSONAS);
+            await processAgentRequestWrapper(message.author.id, message.author.tag, inputPayload, message, discordHistory, userPersonas, activeVoiceConnections);
         }
     });
 

@@ -594,6 +594,11 @@ async function runInteractiveMenu() {
                             { value: 'mcp',        label: menuLabel('mcp', 'Productivity Suite (MCP)') },
                             { value: 'sentinel',   label: menuLabel('srv', 'Start Sentinel Server (Webhooks)') },
                             { value: 'discord',    label: menuLabel('bot', 'Start Discord Bot Companion') },
+                            { value: 'telegram',   label: menuLabel('tg',  'Start Telegram Bot Companion') },
+                            { value: 'digest',     label: menuLabel('dgst','Daily Digest (Project Status)') },
+                            { value: 'mood',       label: menuLabel('mood','Rex Mood Engine') },
+                            { value: 'notif',      label: menuLabel('ntf', 'Notification Router') },
+                            { value: 'reminders',  label: menuLabel('rmn', 'Reminders & Scheduling') },
                             { value: 'back',       label: pc.dim('  back') }
                         ]
                     });
@@ -609,6 +614,26 @@ async function runInteractiveMenu() {
                     if (labAction === 'discord') {
                         const { startDiscordBot } = await import('./discordBot.js');
                         await startDiscordBot();
+                    }
+                    if (labAction === 'telegram') {
+                        const { startTelegramBot } = await import('./telegramBot.js');
+                        await startTelegramBot();
+                    }
+                    if (labAction === 'digest') {
+                        const { showDailyDigest } = await import('./dailyDigest.js');
+                        await showDailyDigest();
+                    }
+                    if (labAction === 'mood') {
+                        const { showMoodMenu } = await import('./moodEngine.js');
+                        await showMoodMenu();
+                    }
+                    if (labAction === 'notif') {
+                        const { notificationRouterMenu } = await import('./notificationRouter.js');
+                        await notificationRouterMenu();
+                    }
+                    if (labAction === 'reminders') {
+                        const { remindersMenu } = await import('./reminders.js');
+                        await remindersMenu();
                     }
                     if (labAction === 'hindsight') { 
                         const dir = path.join(process.cwd(), '.agent', 'hindsight');

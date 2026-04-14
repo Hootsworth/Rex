@@ -1,7 +1,7 @@
 {
   "feature": "Babysit Notes",
   "schemaVersion": 1,
-  "updatedAt": "2026-03-20T15:15:18.020Z",
+  "updatedAt": "2026-04-14T06:58:18.181Z",
   "entries": [
     {
       "at": "2026-03-11T07:28:38.711Z",
@@ -1454,6 +1454,496 @@
           "tag": "button",
           "role": "",
           "text": "",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        }
+      ]
+    },
+    {
+      "at": "2026-04-11T17:54:02.763Z",
+      "host": "duckduckgo.com",
+      "url": "https://duckduckgo.com/?q=airpods+site%3Aamazon.in&ia=web",
+      "title": "airpods site:amazon.in at DuckDuckGo",
+      "task": "Observe amazon product search flow",
+      "model": "gpt-5-nano",
+      "modelUsed": false,
+      "notes": [
+        "hello!"
+      ],
+      "sample": []
+    },
+    {
+      "at": "2026-04-11T17:54:03.199Z",
+      "host": "duckduckgo.com",
+      "url": "https://duckduckgo.com/?q=airpods+site%3Aamazon.in&ia=web",
+      "title": "airpods site:amazon.in at DuckDuckGo",
+      "task": "find airpods listing",
+      "model": "gpt-5-nano",
+      "modelUsed": false,
+      "notes": [
+        "Site host: duckduckgo.com",
+        "Top interactive elements observed: 135",
+        "Use this snapshot for selector confidence and repeat-task handling."
+      ],
+      "sample": [
+        {
+          "id": "1",
+          "tag": "a",
+          "role": "",
+          "text": "DuckDuckGo",
+          "placeholder": "",
+          "href": "/",
+          "inViewport": true
+        },
+        {
+          "id": "2",
+          "tag": "input",
+          "role": "combobox",
+          "text": "Search privately",
+          "placeholder": "Search privately",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "38",
+          "tag": "button",
+          "role": "",
+          "text": "Close menu",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "4",
+          "tag": "a",
+          "role": "",
+          "text": "Protection. Privacy. Peace of mind.",
+          "placeholder": "",
+          "href": "/compare-privacy",
+          "inViewport": true
+        },
+        {
+          "id": "5",
+          "tag": "button",
+          "role": "",
+          "text": "Open menu",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "3",
+          "tag": "button",
+          "role": "",
+          "text": "search",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "39",
+          "tag": "a",
+          "role": "",
+          "text": "Homepage",
+          "placeholder": "",
+          "href": "https://start.duckduckgo.com/",
+          "inViewport": true
+        },
+        {
+          "id": "6",
+          "tag": "a",
+          "role": "",
+          "text": "All",
+          "placeholder": "",
+          "href": "/?q=airpods+site%3Aamazon.in&ia=web",
+          "inViewport": true
+        },
+        {
+          "id": "7",
+          "tag": "a",
+          "role": "",
+          "text": "Images",
+          "placeholder": "",
+          "href": "/?q=airpods+site%3Aamazon.in&ia=images&iax=images",
+          "inViewport": true
+        },
+        {
+          "id": "8",
+          "tag": "a",
+          "role": "",
+          "text": "Videos",
+          "placeholder": "",
+          "href": "/?q=airpods+site%3Aamazon.in&ia=videos&iax=videos",
+          "inViewport": true
+        },
+        {
+          "id": "9",
+          "tag": "a",
+          "role": "",
+          "text": "News",
+          "placeholder": "",
+          "href": "/?q=airpods+site%3Aamazon.in&ia=news&iar=news",
+          "inViewport": true
+        },
+        {
+          "id": "10",
+          "tag": "a",
+          "role": "",
+          "text": "Maps",
+          "placeholder": "",
+          "href": "/?q=airpods+site%3Aamazon.in&iaxm=maps",
+          "inViewport": true
+        },
+        {
+          "id": "11",
+          "tag": "a",
+          "role": "",
+          "text": "Duck.ai",
+          "placeholder": "",
+          "href": "/?q=airpods+site%3Aamazon.in&ia=chat",
+          "inViewport": true
+        },
+        {
+          "id": "12",
+          "tag": "button",
+          "role": "",
+          "text": "Search Settings",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "13",
+          "tag": "a",
+          "role": "",
+          "text": "",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "40",
+          "tag": "a",
+          "role": "",
+          "text": "Themes",
+          "placeholder": "",
+          "href": "/settings#appearance",
+          "inViewport": true
+        },
+        {
+          "id": "41",
+          "tag": "a",
+          "role": "",
+          "text": "Settings",
+          "placeholder": "",
+          "href": "/settings",
+          "inViewport": true
+        },
+        {
+          "id": "14",
+          "tag": "a",
+          "role": "",
+          "text": "India (en)",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "58",
+          "tag": "button",
+          "role": "",
+          "text": "which move?",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "59",
+          "tag": "button",
+          "role": "",
+          "text": "yes",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "60",
+          "tag": "button",
+          "role": "",
+          "text": "no",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "15",
+          "tag": "button",
+          "role": "",
+          "text": "Show all results",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "42",
+          "tag": "button",
+          "role": "",
+          "text": "Positive feedback",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "43",
+          "tag": "button",
+          "role": "",
+          "text": "Negative feedback",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        }
+      ]
+    },
+    {
+      "at": "2026-04-14T06:58:18.105Z",
+      "host": "duckduckgo.com",
+      "url": "https://duckduckgo.com/?q=airpods+site%3Aamazon.in&ia=web",
+      "title": "airpods site:amazon.in at DuckDuckGo",
+      "task": "Observe amazon product search flow",
+      "model": "gpt-5-nano",
+      "modelUsed": false,
+      "notes": [
+        "hello!"
+      ],
+      "sample": []
+    },
+    {
+      "at": "2026-04-14T06:58:18.179Z",
+      "host": "duckduckgo.com",
+      "url": "https://duckduckgo.com/?q=airpods+site%3Aamazon.in&ia=web",
+      "title": "airpods site:amazon.in at DuckDuckGo",
+      "task": "find airpods listing",
+      "model": "gpt-5-nano",
+      "modelUsed": false,
+      "notes": [
+        "Site host: duckduckgo.com",
+        "Top interactive elements observed: 137",
+        "Use this snapshot for selector confidence and repeat-task handling."
+      ],
+      "sample": [
+        {
+          "id": "1",
+          "tag": "a",
+          "role": "",
+          "text": "DuckDuckGo",
+          "placeholder": "",
+          "href": "/",
+          "inViewport": true
+        },
+        {
+          "id": "2",
+          "tag": "input",
+          "role": "combobox",
+          "text": "Search privately",
+          "placeholder": "Search privately",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "12",
+          "tag": "button",
+          "role": "",
+          "text": "Close menu",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "4",
+          "tag": "a",
+          "role": "",
+          "text": "Protection. Privacy. Peace of mind.",
+          "placeholder": "",
+          "href": "/compare-privacy",
+          "inViewport": true
+        },
+        {
+          "id": "5",
+          "tag": "button",
+          "role": "",
+          "text": "Open menu",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "3",
+          "tag": "button",
+          "role": "",
+          "text": "search",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "13",
+          "tag": "a",
+          "role": "",
+          "text": "Homepage",
+          "placeholder": "",
+          "href": "https://start.duckduckgo.com/",
+          "inViewport": true
+        },
+        {
+          "id": "6",
+          "tag": "a",
+          "role": "",
+          "text": "All",
+          "placeholder": "",
+          "href": "/?q=airpods+site%3Aamazon.in&ia=web",
+          "inViewport": true
+        },
+        {
+          "id": "7",
+          "tag": "a",
+          "role": "",
+          "text": "Images",
+          "placeholder": "",
+          "href": "/?q=airpods+site%3Aamazon.in&ia=images&iax=images",
+          "inViewport": true
+        },
+        {
+          "id": "29",
+          "tag": "a",
+          "role": "",
+          "text": "Videos",
+          "placeholder": "",
+          "href": "/?q=airpods+site%3Aamazon.in&ia=videos&iax=videos",
+          "inViewport": true
+        },
+        {
+          "id": "30",
+          "tag": "a",
+          "role": "",
+          "text": "News",
+          "placeholder": "",
+          "href": "/?q=airpods+site%3Aamazon.in&ia=news&iar=news",
+          "inViewport": true
+        },
+        {
+          "id": "31",
+          "tag": "a",
+          "role": "",
+          "text": "Maps",
+          "placeholder": "",
+          "href": "/?q=airpods+site%3Aamazon.in&iaxm=maps",
+          "inViewport": true
+        },
+        {
+          "id": "8",
+          "tag": "a",
+          "role": "",
+          "text": "Duck.ai",
+          "placeholder": "",
+          "href": "/?q=airpods+site%3Aamazon.in&ia=chat",
+          "inViewport": true
+        },
+        {
+          "id": "9",
+          "tag": "button",
+          "role": "",
+          "text": "Search Settings",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "10",
+          "tag": "a",
+          "role": "",
+          "text": "",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "14",
+          "tag": "a",
+          "role": "",
+          "text": "Themes",
+          "placeholder": "",
+          "href": "/settings#appearance",
+          "inViewport": true
+        },
+        {
+          "id": "15",
+          "tag": "a",
+          "role": "",
+          "text": "Settings",
+          "placeholder": "",
+          "href": "/settings",
+          "inViewport": true
+        },
+        {
+          "id": "11",
+          "tag": "a",
+          "role": "",
+          "text": "India (en)",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "",
+          "tag": "button",
+          "role": "",
+          "text": "which move?",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "",
+          "tag": "button",
+          "role": "",
+          "text": "yes",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "",
+          "tag": "button",
+          "role": "",
+          "text": "no",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "32",
+          "tag": "button",
+          "role": "",
+          "text": "Show all results",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "16",
+          "tag": "button",
+          "role": "",
+          "text": "Positive feedback",
+          "placeholder": "",
+          "href": "",
+          "inViewport": true
+        },
+        {
+          "id": "17",
+          "tag": "button",
+          "role": "",
+          "text": "Negative feedback",
           "placeholder": "",
           "href": "",
           "inViewport": true
