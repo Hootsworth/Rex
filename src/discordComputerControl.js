@@ -32,6 +32,7 @@ import {
 import { captureScreen } from './vision.js';
 import { planScreenActions, executeActionPlan } from './cursorVoiceAgent.js';
 import { playAudioCue } from './audioCues.js';
+import { classifyActionRisk } from './actionRiskGuard.js';
 
 // Map of userId -> { sessionId, userId, channelId, task, expiresAt, messageId }
 const pendingPermissions = new Map();
@@ -98,18 +99,22 @@ export async function requestComputerPermission({ message, task, client, channel
     const targetChannel = channel || message?.channel;
     const userId = message?.author?.id || 'unknown';
     const sessionId = `perm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const risk = classifyActionRisk(task);
+    const color = risk.level === 'HIGH_RISK' ? 0xFF3366 : (risk.level === 'MODERATE' ? 0xFFA500 : 0x00FF88);
 
     const embed = new EmbedBuilder()
-        .setColor(0x00FF88)
+        .setColor(color)
         .setTitle('🦖 Rex Screen Control Permission Request')
         .setDescription(
             `You requested autonomous computer control on your Mac:\n` +
-            `> **Task**: "${task}"\n\n` +
+            `> **Task**: "${task}"\n` +
+            `> **Risk Assessment**: \`${risk.level}\` (${risk.reason})\n\n` +
             `**Autonomous Capabilities Rex Will Deploy:**\n` +
-            `• 🎯 **Visual Hitbox Detection**: Multimodal scanning of buttons, inputs, & sliders\n` +
+            `• 🎯 **AXUIElement Precision**: Native macOS Accessibility hitboxes\n` +
+            `• 🛑 **Emergency Brake**: Touch your physical mouse or hit \`Esc\` to pause anytime\n` +
+            `• 🔄 **Closed-Loop Verifier**: Auto-dismisses unexpected blocker popups\n` +
             `• 🖱️ **Hardware Cursors**: Native OS clicks, double clicks, & multi-point drags\n` +
-            `• ⌨️ **Keyboard Automation**: Form typing & native macOS shortcuts\n` +
-            `• 🦖 **Visual Copilot**: 8-bit Baby Rex & mouse pointer guide\n\n` +
+            `• ⌨️ **Keyboard Automation**: Form typing & native macOS shortcuts\n\n` +
             `*Safety Protocol: Real OS actions require your explicit permission.*`
         )
         .setFooter({ text: 'Click Authorize or reply "yes" / "confirm" in chat. Reply "no" / "cancel" to deny.' })

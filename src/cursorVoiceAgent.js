@@ -36,8 +36,15 @@ import {
     cursorHighlight,
     hideCursorHighlight,
     getTargetWindowBounds,
-    getScreenDimensions
+    getScreenDimensions,
+    onUserBargeIn
 } from './screenCursor.js';
+import { findBestUiElement } from './accessibilityInspector.js';
+import { classifyActionRisk } from './actionRiskGuard.js';
+import { recordMacroStep, isRecordingMacro } from './cursorMacroRecorder.js';
+import { verifyAndSelfCorrect } from './closedLoopVerifier.js';
+import { dropFileIntoWindow } from './crossAppDragDrop.js';
+import { autofillActiveForm } from './formAutofillEngine.js';
 
 const execAsync = promisify(exec);
 
@@ -783,13 +790,38 @@ export async function executeActionPlan(plan, screenWidth = 1470, screenHeight =
 
     let lastTargetX = Math.round(screenWidth / 2);
     let lastTargetY = Math.round(screenHeight / 2);
+    let userInterrupted = false;
+
+    onUserBargeIn((evt) => {
+        userInterrupted = true;
+    });
 
     for (const step of plan.steps) {
+        if (userInterrupted) {
+            cursorSpeak("Emergency Brake: Autonomous sequence paused. Controls yielded to you.", 4000, "PAUSED");
+            break;
+        }
+
         const hasExplicitX = step.x !== undefined && step.x !== null;
         const hasExplicitY = step.y !== undefined && step.y !== null;
 
         let targetX = hasExplicitX ? Number(step.x) : lastTargetX;
         let targetY = hasExplicitY ? Number(step.y) : lastTargetY;
+        let w = Math.min(screenWidth, Number(step.w) || 160);
+        let h = Math.min(screenHeight, Number(step.h) || 60);
+
+        // 1. Accessibility Tree Hitbox Refinement (pixel-perfect native coordinate matching)
+        if (step.label && plan.activeApp) {
+            try {
+                const axElem = await findBestUiElement(plan.activeApp, step.label);
+                if (axElem && axElem.width > 12 && axElem.height > 10) {
+                    targetX = Math.round(axElem.x + axElem.width / 2);
+                    targetY = Math.round(axElem.y + axElem.height / 2);
+                    w = Math.round(axElem.width);
+                    h = Math.round(axElem.height);
+                }
+            } catch {}
+        }
 
         // If coordinates were provided in Retina physical image pixel space, scale down to macOS points
         if (targetX > screenWidth && scaleX > 1.0) targetX /= scaleX;
@@ -807,24 +839,31 @@ export async function executeActionPlan(plan, screenWidth = 1470, screenHeight =
         toX = Math.max(10, Math.min(screenWidth - 10, Math.round(toX)));
         toY = Math.max(10, Math.min(screenHeight - 10, Math.round(toY)));
 
-        const w = Math.min(screenWidth, Number(step.w) || 160);
-        const h = Math.min(screenHeight, Number(step.h) || 60);
         const boxX = Math.max(10, targetX - w / 2);
         const boxY = Math.max(10, targetY - h / 2);
 
-        // 1. Visibly move Rex cursor to target
+        // 2. Action Risk Classification & Safety Guardrails
+        const risk = classifyActionRisk(step.label || '', step.speech || '');
+        if (risk.level === 'HIGH_RISK') {
+            cursorHighlight(boxX, boxY, w, h, `HIGH RISK: ${step.label}`);
+            cursorSpeak(`Caution: High-risk operation detected (${risk.reason}). Verifying safety...`, 4000, "CAUTION");
+            playAudioCue('warn');
+            await sleep(1800);
+        }
+
+        // 3. Visibly move Rex cursor to target
         moveCursorTo(targetX, targetY, 400, step.cursorStyle || 'handpointing');
         await sleep(420);
 
-        // 2. Draw spotlight highlight box around the UI element
+        // 4. Draw spotlight highlight box around the UI element
         cursorHighlight(boxX, boxY, w, h, step.label || `Step ${step.step}`);
 
-        // 3. Show glassmorphic speech bubble and speak aloud (scrub any rogue emojis from model)
+        // 5. Show glassmorphic speech bubble and speak aloud (scrub any rogue emojis from model)
         const cleanSpeech = (step.speech || '').replace(/[\p{Extended_Pictographic}\uFE0F]/gu, '').trim();
         cursorSpeak(cleanSpeech, 4500, `STEP ${step.step || 1}`);
         speakAloud(cleanSpeech).catch(() => {});
 
-        // 4. ACTUALLY EXECUTE REAL OS ACTION ON MAC (real takeover!)
+        // 6. ACTUALLY EXECUTE REAL OS ACTION ON MAC (real takeover!)
         const action = (step.action || (step.click ? 'click' : 'click')).toLowerCase();
 
         if (action === 'type' || step.text) {
@@ -864,6 +903,26 @@ export async function executeActionPlan(plan, screenWidth = 1470, screenHeight =
             await sleep(350);
         }
 
+        // 7. Closed-loop verification and self-correction (auto-dismiss blocker dialogs if any)
+        try {
+            await verifyAndSelfCorrect(step, plan.activeApp);
+        } catch {}
+
+        // 8. Record macro step if recording is active
+        if (isRecordingMacro()) {
+            recordMacroStep({
+                action,
+                label: step.label,
+                x: targetX,
+                y: targetY,
+                w,
+                h,
+                text: step.text,
+                key: step.key,
+                app: plan.activeApp
+            });
+        }
+
         executedSteps.push({
             step: step.step || (executedSteps.length + 1),
             action,
@@ -880,7 +939,7 @@ export async function executeActionPlan(plan, screenWidth = 1470, screenHeight =
         });
 
         // Wait for user to observe and UI to respond
-        await sleep(2600);
+        await sleep(2400);
     }
 
     // Finish tour and hold autonomous position (do NOT snap to user cursor!)

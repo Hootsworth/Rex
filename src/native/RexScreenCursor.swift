@@ -19,6 +19,8 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     var targetX: CGFloat = 100
     var targetY: CGFloat = 100
     var lastMousePos: NSPoint = .zero
+    var lastUserMousePos: NSPoint = .zero
+    var autonomousBargeInEnabled: Bool = true
     var isReady: Bool = false
     var timer: Timer?
 
@@ -65,17 +67,27 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
 
         loadHtml()
 
-        // Global Hotkey Monitor: Control + Shift + Space or Control + Shift + R
-        NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
+        // Global Hotkey Monitor: Control + Shift + Space, Control + Shift + R, or Escape (Emergency Pause)
+        NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self else { return }
             let flags = event.modifierFlags
             let isControl = flags.contains(.control)
             let isShift = flags.contains(.shift)
             let isOption = flags.contains(.option)
 
-            // Space keycode: 49, R keycode: 15
+            // Space keycode: 49, R keycode: 15, Escape keycode: 53
             let isCtrlShiftSpace = isControl && isShift && event.keyCode == 49
             let isCtrlShiftR = isControl && isShift && event.keyCode == 15
             let isOptShiftSpace = isOption && isShift && event.keyCode == 49
+            let isEscape = event.keyCode == 53
+
+            if isEscape && self.mode == "autonomous" {
+                self.mode = "paused"
+                self.callJS("window.showRexSpeech('Emergency Brake: Paused via Escape key.', 4000, 'PAUSED')")
+                print("{\"event\":\"bargeIn\",\"reason\":\"escapeKey\"}")
+                fflush(stdout)
+                return
+            }
 
             if isCtrlShiftSpace || isCtrlShiftR || isOptShiftSpace {
                 let shortcutName = isCtrlShiftR ? "Ctrl+Shift+R" : (isOptShiftSpace ? "Option+Shift+Space" : "Ctrl+Shift+Space")
@@ -84,7 +96,7 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             }
         }
 
-        // 60Hz tracking timer for global mouse tracking
+        // 60Hz tracking timer for global mouse tracking and emergency brake detection
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             self?.tickMouseTracking()
         }
@@ -98,9 +110,31 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     }
 
     func tickMouseTracking() {
-        guard isReady && mode == "follow" else { return }
+        guard isReady else { return }
 
         let rawPos = NSEvent.mouseLocation
+
+        // Emergency Brake / Take the Wheel detection in autonomous mode
+        if mode == "autonomous" && autonomousBargeInEnabled {
+            if lastUserMousePos != .zero {
+                let dx = rawPos.x - lastUserMousePos.x
+                let dy = rawPos.y - lastUserMousePos.y
+                let dist = sqrt(dx * dx + dy * dy)
+                if dist > 45 {
+                    self.mode = "paused"
+                    self.callJS("window.showRexSpeech('Control yielded to user. Tap Control+Shift+Space to resume!', 4000, 'PAUSED')")
+                    print("{\"event\":\"bargeIn\",\"reason\":\"mouseMoved\",\"x\":\(rawPos.x),\"y\":\(self.screenFrame.height - rawPos.y)}")
+                    fflush(stdout)
+                }
+            }
+            lastUserMousePos = rawPos
+            return
+        }
+
+        lastUserMousePos = rawPos
+
+        guard mode == "follow" else { return }
+
         if rawPos != lastMousePos {
             lastMousePos = rawPos
             // Convert Cocoa coordinates (origin at bottom-left) to Web coordinates (origin at top-left)
@@ -503,6 +537,24 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                     print("{\"event\":\"windowBounds\",\"data\":\(jsonStr)}")
                     fflush(stdout)
                 }
+
+            case "pause":
+                self.mode = "paused"
+                self.callJS("window.showRexSpeech('Autonomous execution paused.', 3000, 'PAUSED')")
+                print("{\"event\":\"paused\"}")
+                fflush(stdout)
+
+            case "resume":
+                self.mode = "autonomous"
+                self.lastUserMousePos = NSEvent.mouseLocation
+                self.callJS("window.showRexSpeech('Resuming autonomous control.', 3000, 'RESUMED')")
+                print("{\"event\":\"resumed\"}")
+                fflush(stdout)
+
+            case "setBargeIn":
+                self.autonomousBargeInEnabled = json["enabled"] as? Bool ?? true
+                print("{\"event\":\"bargeInUpdated\",\"enabled\":\(self.autonomousBargeInEnabled)}")
+                fflush(stdout)
 
             case "quit":
                 NSApp.terminate(nil)

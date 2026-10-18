@@ -17,6 +17,7 @@ __pycache__/
 .env.*.local
 .rex/doctor-last-report.json
 .rex/preflight-analyse-plot.json
+.rex/macros/
 .rex/cache/
 .rex/vision/
 .rex_briefing_*.wav

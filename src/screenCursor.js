@@ -13,8 +13,10 @@ const NATIVE_DIR = path.join(process.cwd(), 'src', 'native');
 const BIN_DIR = path.join(NATIVE_DIR, 'bin');
 const BIN_PATH = path.join(BIN_DIR, 'rex-cursor-overlay');
 const WINDOW_BOUNDS_BIN = path.join(BIN_DIR, 'rex-window-bounds');
+const AX_INSPECT_BIN = path.join(BIN_DIR, 'rex-ax-inspect');
 const SWIFT_SRC = path.join(NATIVE_DIR, 'RexScreenCursor.swift');
 const WINDOW_BOUNDS_SRC = path.join(NATIVE_DIR, 'rex-window-bounds.swift');
+const AX_INSPECT_SRC = path.join(NATIVE_DIR, 'rex-ax-inspect.swift');
 
 let overlayProcess = null;
 let overlayRl = null;
@@ -24,6 +26,7 @@ let currentStyle = 'default';
 let screenDimensions = { width: 1470, height: 956 };
 let readyPromiseResolver = null;
 let isStarting = false;
+let onBargeInCallback = null;
 
 /**
  * Ensure native swift binaries are compiled.
@@ -56,6 +59,13 @@ export async function ensureNativeBinary() {
     if (!fs.existsSync(WINDOW_BOUNDS_BIN) && fs.existsSync(WINDOW_BOUNDS_SRC)) {
         try {
             const cmd = `swiftc -O -module-cache-path "${cacheDir}" "${WINDOW_BOUNDS_SRC}" -o "${WINDOW_BOUNDS_BIN}"`;
+            await execAsync(cmd, { timeout: 15000 });
+        } catch {}
+    }
+
+    if (!fs.existsSync(AX_INSPECT_BIN) && fs.existsSync(AX_INSPECT_SRC)) {
+        try {
+            const cmd = `swiftc -O -module-cache-path "${cacheDir}" "${AX_INSPECT_SRC}" -o "${AX_INSPECT_BIN}"`;
             await execAsync(cmd, { timeout: 15000 });
         } catch {}
     }
@@ -204,6 +214,11 @@ export async function startScreenCursor(options = {}) {
                     import('./cursorVoiceAgent.js').then(m => {
                         m.triggerVoiceCommand({ dimensions: screenDimensions });
                     }).catch(console.error);
+                } else if (event.event === 'bargeIn') {
+                    console.log(pc.yellow(`\n🛑 Emergency Brake / User Barge-In detected (${event.reason || 'user intervention'}). Yielding control.`));
+                    if (onBargeInCallback) {
+                        try { onBargeInCallback(event); } catch {}
+                    }
                 }
             } catch {}
         });
@@ -315,6 +330,36 @@ export function stopScreenCursor() {
         overlayProcess = null;
         overlayRl = null;
     }
+}
+
+/**
+ * Register a listener for user emergency brake / barge-in.
+ * @param {function} fn
+ */
+export function onUserBargeIn(fn) {
+    onBargeInCallback = fn;
+}
+
+/**
+ * Pause autonomous takeover and yield control to user.
+ */
+export function pauseScreenCursor() {
+    return sendCommand({ cmd: 'pause' });
+}
+
+/**
+ * Resume autonomous takeover.
+ */
+export function resumeScreenCursor() {
+    return sendCommand({ cmd: 'resume' });
+}
+
+/**
+ * Enable or disable automatic barge-in detection.
+ * @param {boolean} enabled
+ */
+export function setBargeInEnabled(enabled = true) {
+    return sendCommand({ cmd: 'setBargeIn', enabled });
 }
 
 /**

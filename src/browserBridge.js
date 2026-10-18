@@ -200,3 +200,51 @@ export function getExtensionBridgeStatus() {
         marksCount: lastExtensionState.marks.length
     };
 }
+
+/**
+ * Open a specific URL in Zen Browser, Google Chrome, or default browser.
+ * @param {string} browserName "Zen", "Google Chrome", "Safari"
+ * @param {string} targetUrl URL to open
+ */
+export async function openUrlInBrowser(browserName = 'Zen', targetUrl = 'https://google.com') {
+    const { exec } = await import('child_process');
+    const { promisify } = await import('util');
+    const execAsync = promisify(exec);
+
+    let app = browserName;
+    if (app.toLowerCase().includes('zen')) app = 'Zen';
+    else if (app.toLowerCase().includes('chrome')) app = 'Google Chrome';
+    else if (app.toLowerCase().includes('safari')) app = 'Safari';
+
+    try {
+        await execAsync(`open -a "${app}" "${targetUrl}"`);
+        return { ok: true, browser: app, url: targetUrl };
+    } catch {
+        try {
+            await execAsync(`open "${targetUrl}"`);
+            return { ok: true, browser: 'default', url: targetUrl };
+        } catch (e) {
+            return { ok: false, error: e.message };
+        }
+    }
+}
+
+/**
+ * Scroll within active window using native arrow or space keys.
+ * @param {'down'|'up'|'pageDown'|'pageUp'} direction
+ */
+export async function scrollBrowser(direction = 'down') {
+    const { cursorKeyPress } = await import('./screenCursor.js');
+    if (direction === 'pageDown') {
+        cursorKeyPress('space');
+    } else if (direction === 'pageUp') {
+        cursorKeyPress('space', ['shift']);
+    } else if (direction === 'up') {
+        cursorKeyPress('up');
+        cursorKeyPress('up');
+    } else {
+        cursorKeyPress('down');
+        cursorKeyPress('down');
+    }
+    return { ok: true, direction };
+}
