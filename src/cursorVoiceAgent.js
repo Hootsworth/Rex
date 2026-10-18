@@ -53,6 +53,7 @@ import {
     resolveActionHitbox,
     generateOmniGroundedPlan
 } from './omniGroundingEngine.js';
+import { executeAppleScript } from './appleScript.js';
 
 const execAsync = promisify(exec);
 
@@ -129,10 +130,17 @@ async function transcribeAudio(wavPath) {
 }
 
 /**
- * Speak text aloud using system TTS or Cartesia
+ * Speak text aloud using system TTS or Cartesia.
+ * Silenced during autonomous computer control execution per user request.
  */
+let isSpeakingAloudEnabled = false;
+
+export function setSpeakingAloudEnabled(enabled = false) {
+    isSpeakingAloudEnabled = Boolean(enabled);
+}
+
 async function speakAloud(text) {
-    if (!text) return;
+    if (!text || !isSpeakingAloudEnabled) return;
     try {
         const { generateCartesiaSpeech } = await import('./cartesia.js');
         const audioPath = path.join(process.cwd(), `.rex_cursor_voice_${Date.now()}.wav`);
@@ -186,7 +194,27 @@ export async function planScreenActions(screenshotPath, userCommand, screenWidth
 
     const systemPrompt = `
 You are Rex, an autonomous expert AI desktop copilot with direct operating system control over macOS.
-You take REAL actions directly on the user's screen: clicking buttons, double clicking, right clicking, dragging sliders, typing text into form inputs, and triggering shortcuts.
+You have BOTH programmatic OS capabilities (AppleScript, bash shell commands, native app activation, URL launching) AND physical computer control (mouse clicking, dragging, typing, shortcuts).
+
+CRITICAL RULE — HYBRID EXECUTION (MIX & MATCH):
+Always use the fastest, most reliable native method for each step. Use physical computer control (mouse/keyboard screen takeover) ONLY when visual UI interaction on screen is actually required.
+
+1. Launching Apps or Opening URLs:
+   - DO NOT visually hunt around the Dock, Spotlight, or screen to launch an app.
+   - Use action: "openApp" (with "app": "Spotify", "Zen Browser", "Terminal", "Finder", etc.)
+   - Or action: "openUrl" (with "url": "https://web.whatsapp.com", "app": "Zen Browser")
+2. Music, Media, System Settings, & Volume:
+   - For Spotify or Music playback: use action: "applescript" (e.g. script: 'tell application "Spotify" to play', 'tell application "Spotify" to pause')
+   - For system volume or mute: use action: "applescript" (e.g. script: 'set volume output volume 50')
+3. Shell / Terminal Commands:
+   - To run shell commands, file operations, scripts: use action: "command" (e.g. command: 'open -a Spotify', 'git status', 'ls -la')
+4. Visual Computer Control (Screen Takeover):
+   - Use computer control ONLY when physical screen interaction is needed:
+     * Clicking buttons, links, tabs, contacts, checkboxes on screen
+     * Typing into web forms, chat boxes, search bars, canvas fields
+     * Dragging sliders, color wheels, canvas objects
+     * Answering or solving visual questions on screen
+   - Always prefer Set-of-Marks "targetId" whenever matching a marked element [ID]!
 
 The user has given this command while looking at their screen:
 "${userCommand}"
@@ -198,26 +226,18 @@ The screenshot has been analyzed and marked with high-contrast numbered badges (
 Below is the verified list of live interactive hitboxes extracted directly from the display:
 ${groundedContext}
 
-CRITICAL ACCURACY & GROUNDING RULES:
-1. PREFER Set-of-Marks [ID]: Whenever interacting with an element listed in the grounded elements above, set "targetId" to its integer ID. Rex's native engine will snap with 100% pixel precision to that element's center.
-2. If typing or searching, identify the corresponding input field's "targetId" and set "action": "type", "text": "...", and "submit": true/false.
-3. If an element is visible on the screenshot but does not have a numbered mark badge (e.g. custom icon or split pane), specify accurate display coordinates (x, y) on the ${screenWidth}x${screenHeight} display, and provide a descriptive "label" and "targetText".
-4. ZERO HALLUCINATION: DO NOT click random percentage coordinates or make up fake controls. Zen Browser and modern web apps (like WhatsApp Web) have unique fluid layouts (vertical tabs, sidebars, split panes); always anchor your actions to what is actually visible.
-5. Autonomous Multi-Step Execution: Generate all sequential steps required to completely satisfy the user's intent. Break the task down into:
-   - Activating or focusing the relevant window/field
-   - Searching or navigating to the desired item
-   - Selecting or clicking the target
-   - Typing required text
-   - Confirming or submitting the action
-
 Return a JSON response with:
-- "activeApp": Exact Name of the application (e.g. "Zen", "Google Chrome", "DaVinci Resolve", "WhatsApp", "Finder")
+- "activeApp": Exact Name of the application (e.g. "Spotify", "Zen Browser", "Google Chrome", "DaVinci Resolve", "WhatsApp", "Finder")
 - "summary": A concise 1-2 sentence executive explanation of what Rex is doing
-- "steps": An array of sequential UI steps for Rex to physically execute.
+- "steps": An array of sequential hybrid steps for Rex to execute.
   Each step must have:
   * "step": integer (1, 2, 3...)
-  * "action": "click" | "type" | "drag" | "doubleClick" | "rightClick" | "key"
-  * "targetId": (optional) integer ID matching one of the [ID] Set-of-Marks badges above
+  * "action": "openApp" | "openUrl" | "applescript" | "command" | "click" | "type" | "drag" | "doubleClick" | "rightClick" | "key"
+  * "app": string app name (if action is "openApp" or "openUrl")
+  * "url": string URL (if action is "openUrl")
+  * "script": string AppleScript code (if action is "applescript")
+  * "command": string shell command (if action is "command")
+  * "targetId": (optional) integer ID matching one of the [ID] Set-of-Marks badges above (if physical action)
   * "targetText": (optional) string text of the target element on screen
   * "x": approximate integer X pixel coordinate on display (0 to ${screenWidth})
   * "y": approximate integer Y pixel coordinate on display (0 to ${screenHeight})
@@ -229,8 +249,8 @@ Return a JSON response with:
   * "modifiers": array of strings (e.g. ["cmd"])
   * "w": bounding box width (e.g. 120)
   * "h": bounding box height (e.g. 45)
-  * "label": Short name of element (e.g. "Search Input", "WhatsApp Contact", "Submit Button")
-  * "speech": Concise, helpful instruction spoken to user (1-2 clear sentences. CRITICAL: Do NOT use any emojis anywhere in your text or speech. Use clean, elegant text only.)
+  * "label": Short name of action/element (e.g. "Open Spotify", "Play Music", "Search Bar", "Submit Button")
+  * "speech": Concise explanation displayed in Rex card (CRITICAL: Do NOT use any emojis in text or speech. Use clean, elegant text only.)
   * "cursorStyle": "handpointing" | "handopen" | "handgrabbing" | "beachball" | "default"
 
 CRITICAL: Return ONLY valid, parseable JSON with NO markdown code fences or backticks. Do NOT include ANY emojis in any text fields.
@@ -411,6 +431,71 @@ export async function executeActionPlan(plan, screenWidth = 1470, screenHeight =
                 break;
             }
 
+        const action = (step.action || (step.click ? 'click' : 'click')).toLowerCase().trim();
+        const cleanSpeech = (step.speech || step.label || '').replace(/[\p{Extended_Pictographic}\uFE0F]/gu, '').trim();
+
+        // 1. Programmatic Native Execution (Open apps, AppleScript, shell commands - no clumsy cursor clicking!)
+        const isProgrammatic = ['openapp', 'openurl', 'applescript', 'command', 'bash', 'wait'].includes(action) ||
+                               Boolean(step.script) || Boolean(step.command) ||
+                               (Boolean(step.app) && !['click', 'type', 'drag', 'doubleclick', 'rightclick'].includes(action));
+
+        if (isProgrammatic) {
+            setRexEmotion('excited');
+            if (cleanSpeech) {
+                cursorSpeak(cleanSpeech, 3000, `CMD ${step.step || 1}`);
+                // Note: Rex is completely silent during computer control per user request (no speakAloud)
+            }
+
+            if (action === 'openapp' || step.app) {
+                const appName = step.app || plan.activeApp || '';
+                if (appName) {
+                    cursorActivateApp(appName);
+                    await execAsync(`open -a "${appName}"`).catch(() => {});
+                    await sleep(600);
+                }
+            } else if (action === 'openurl' || step.url) {
+                const url = step.url;
+                const app = step.app || '';
+                const cmd = app ? `open -a "${app}" "${url}"` : `open "${url}"`;
+                await execAsync(cmd).catch(() => {});
+                await sleep(800);
+            } else if (action === 'applescript' || step.script) {
+                const script = step.script || '';
+                if (script) {
+                    const res = await executeAppleScript(script);
+                    console.log(pc.cyan(`[Rex AppleScript]: ${res.success ? 'Success' : res.error}`));
+                    await sleep(400);
+                }
+            } else if (action === 'command' || action === 'bash' || step.command) {
+                const cmd = step.command || '';
+                if (cmd) {
+                    try {
+                        const { stdout } = await execAsync(cmd, { timeout: 12000 });
+                        console.log(pc.cyan(`[Rex Shell]: "${cmd.slice(0, 40)}" -> ${stdout.trim().slice(0, 80)}`));
+                    } catch (e) {
+                        console.warn(pc.yellow(`[Rex Shell Warning]: "${cmd.slice(0, 40)}" -> ${e.message}`));
+                    }
+                    await sleep(400);
+                }
+            } else if (action === 'wait') {
+                await sleep(Number(step.duration) || 1000);
+            }
+
+            executedSteps.push({
+                step: step.step || (executedSteps.length + 1),
+                action: action || 'command',
+                label: step.label || step.app || step.command || 'Programmatic Action',
+                app: step.app,
+                command: step.command,
+                script: step.script,
+                speech: cleanSpeech
+            });
+
+            await sleep(800);
+            continue;
+        }
+
+        // 2. Physical Screen Cursor Control (Computer Control ONLY when visual UI interaction is needed)
         const hasExplicitX = step.x !== undefined && step.x !== null;
         const hasExplicitY = step.y !== undefined && step.y !== null;
 
@@ -419,7 +504,7 @@ export async function executeActionPlan(plan, screenWidth = 1470, screenHeight =
         let w = Math.min(screenWidth, Number(step.w) || 160);
         let h = Math.min(screenHeight, Number(step.h) || 60);
 
-        // 1. Accessibility Tree Hitbox Refinement (if not already grounded)
+        // Accessibility Tree Hitbox Refinement (if not already grounded)
         if (!step.grounded && step.label && plan.activeApp) {
             try {
                 const axElem = await findBestUiElement(plan.activeApp, step.label);
@@ -456,7 +541,7 @@ export async function executeActionPlan(plan, screenWidth = 1470, screenHeight =
         const boxX = Math.max(10, targetX - w / 2);
         const boxY = Math.max(10, targetY - h / 2);
 
-        // 2. Action Risk Classification & Safety Guardrails
+        // Action Risk Classification & Safety Guardrails
         const risk = classifyActionRisk(step.label || '', step.speech || '');
         if (risk.level === 'HIGH_RISK') {
             setRexEmotion('surprised');
@@ -468,21 +553,17 @@ export async function executeActionPlan(plan, screenWidth = 1470, screenHeight =
             setRexEmotion('excited');
         }
 
-        // 3. Visibly move Rex cursor to target
+        // Visibly move Rex cursor to target
         moveCursorTo(targetX, targetY, 400, step.cursorStyle || 'handpointing');
         await sleep(420);
 
-        // 4. Draw spotlight highlight box around the UI element
+        // Draw spotlight highlight box around the UI element
         cursorHighlight(boxX, boxY, w, h, step.label || `Step ${step.step}`);
 
-        // 5. Show glassmorphic speech bubble and speak aloud (scrub any rogue emojis from model)
-        const cleanSpeech = (step.speech || '').replace(/[\p{Extended_Pictographic}\uFE0F]/gu, '').trim();
+        // Show glassmorphic speech bubble silently (no audio speech aloud during computer control!)
         cursorSpeak(cleanSpeech, 4500, `STEP ${step.step || 1}`);
-        speakAloud(cleanSpeech).catch(() => {});
 
-        // 6. ACTUALLY EXECUTE REAL OS ACTION ON MAC (real takeover!)
-        const action = (step.action || (step.click ? 'click' : 'click')).toLowerCase();
-
+        // ACTUALLY EXECUTE REAL OS ACTION ON MAC (real takeover!)
         if (action === 'type' || step.text) {
             // Click directly into the field twice with delay to ensure window focus and caret placement
             cursorClick(targetX, targetY, 'handpointing', true);
@@ -507,7 +588,6 @@ export async function executeActionPlan(plan, screenWidth = 1470, screenHeight =
             cursorDrag(targetX, targetY, toX, toY, 15);
             await sleep(400);
         } else if (action === 'key') {
-            // If key action has explicit coordinates (e.g. send button), click the target button to trigger action reliably!
             if (hasExplicitX && hasExplicitY) {
                 cursorClick(targetX, targetY, 'handpointing', true);
                 await sleep(200);

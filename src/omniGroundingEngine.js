@@ -95,6 +95,19 @@ export function formatGroundedElementsContext(elements = []) {
  * @returns {{x: number, y: number, w: number, h: number, matched: boolean, label: string}}
  */
 export function resolveActionHitbox(step, elements = [], defaultX = 700, defaultY = 450) {
+    const act = (step.action || '').toLowerCase().trim();
+    if (['openapp', 'applescript', 'command', 'bash', 'openurl', 'wait'].includes(act) ||
+        step.script || step.command || (step.app && !['click', 'type', 'drag', 'doubleclick', 'rightclick'].includes(act))) {
+        return {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+            matched: true,
+            label: step.label || step.app || step.command || 'Programmatic Action'
+        };
+    }
+
     if (!Array.isArray(elements) || elements.length === 0) {
         return {
             x: Number(step.x) || defaultX,
@@ -227,19 +240,123 @@ export function resolveActionHitbox(step, elements = [], defaultX = 700, default
  */
 export function generateOmniGroundedPlan(userCommand = '', elements = [], screenWidth = 1470, screenHeight = 956) {
     const cmd = String(userCommand || '').toLowerCase().trim();
+    const hasElements = Array.isArray(elements) && elements.length > 0;
+    const steps = [];
 
-    if (!Array.isArray(elements) || elements.length === 0) {
+    // 1. Programmatic Media & Spotify Intent (Native AppleScript - no clumsy screen clicking)
+    if (cmd.includes('spotify') || cmd.includes('music') || cmd.includes('song') || (cmd.includes('play') && !cmd.includes('video'))) {
+        let stepNum = 1;
+        steps.push({
+            step: stepNum++,
+            action: "openApp",
+            app: "Spotify",
+            label: "Launch Spotify",
+            speech: "Launching Spotify."
+        });
+
+        if (cmd.includes('pause') || cmd.includes('stop')) {
+            steps.push({
+                step: stepNum++,
+                action: "applescript",
+                script: 'tell application "Spotify" to pause',
+                label: "Pause Spotify",
+                speech: "Pausing playback."
+            });
+        } else if (cmd.includes('next') || cmd.includes('skip')) {
+            steps.push({
+                step: stepNum++,
+                action: "applescript",
+                script: 'tell application "Spotify" to next track',
+                label: "Next Track",
+                speech: "Skipping to next track."
+            });
+        } else {
+            steps.push({
+                step: stepNum++,
+                action: "applescript",
+                script: 'tell application "Spotify" to play',
+                label: "Play Music",
+                speech: "Starting music playback."
+            });
+        }
+
         return {
-            activeApp: "Active Application",
-            summary: `No clear interactive controls detected for "${userCommand}". Standing by.`,
-            steps: []
+            activeApp: "Spotify",
+            summary: `Launching Spotify and managing playback via native AppleScript.`,
+            steps
         };
     }
 
-    const steps = [];
+    // 2. Programmatic System Volume Control
+    if (cmd.includes('volume') || cmd.includes('mute') || cmd.includes('unmute')) {
+        const volMatch = cmd.match(/(\d+)/);
+        const vol = volMatch ? Math.max(0, Math.min(100, parseInt(volMatch[1], 10))) : 50;
+        const script = cmd.includes('mute')
+            ? 'set volume output muted true'
+            : (cmd.includes('unmute') ? 'set volume output muted false' : `set volume output volume ${vol}`);
+        return {
+            activeApp: "System Settings",
+            summary: `Adjusting system audio volume.`,
+            steps: [{
+                step: 1,
+                action: "applescript",
+                script,
+                label: cmd.includes('mute') ? "Mute Volume" : `Set Volume to ${vol}%`,
+                speech: "Updating volume setting."
+            }]
+        };
+    }
 
-    // A. WhatsApp / Chat Messaging Intent
-    if (cmd.includes('whatsapp') || cmd.includes('wahsyapp') || cmd.includes('chat') || cmd.includes('message') || cmd.includes('send')) {
+    // 3. Programmatic Shell / Terminal Commands
+    if (cmd.startsWith('run command') || cmd.startsWith('run ') || cmd.includes('git status') || cmd.includes('npm ') || cmd.includes('pnpm ')) {
+        const runMatch = cmd.match(/(?:run\s+(?:command\s+)?|execute\s+)(?:["']([^"']+)["']|(.+))/i);
+        const commandStr = runMatch ? (runMatch[1] || runMatch[2] || '').trim() : '';
+        if (commandStr) {
+            return {
+                activeApp: "Terminal",
+                summary: `Executing native shell command: "${commandStr}".`,
+                steps: [{
+                    step: 1,
+                    action: "command",
+                    command: commandStr,
+                    label: `Run: ${commandStr.slice(0, 30)}`,
+                    speech: `Executing command.`
+                }]
+            };
+        }
+    }
+
+    // 4. Programmatic App Launching (e.g. "open Zen", "open Safari", "open Terminal", "open Notes")
+    const openMatch = cmd.match(/^(?:please\s+)?(?:open|launch|activate)\s+([a-zA-Z0-9_\s-]+)$/i);
+    if (openMatch && !openMatch[1].includes('whatsapp') && !openMatch[1].includes('chat')) {
+        let appTarget = openMatch[1].trim();
+        if (appTarget.toLowerCase() === 'zen') appTarget = 'Zen Browser';
+        return {
+            activeApp: appTarget,
+            summary: `Launching ${appTarget} via native macOS integration.`,
+            steps: [{
+                step: 1,
+                action: "openApp",
+                app: appTarget,
+                label: `Open ${appTarget}`,
+                speech: `Opening ${appTarget}.`
+            }]
+        };
+    }
+
+    // 5. WhatsApp / Messaging Intent (Hybrid: native app focus + visual computer control)
+    if (cmd.includes('whatsapp') || cmd.includes('wahsyapp') || cmd.includes('chat') || cmd.includes('message') || cmd.includes('send') || (cmd.includes('zen') && (cmd.includes('send') || cmd.includes('type')))) {
+        let stepNum = 1;
+        const targetApp = cmd.includes('chrome') ? 'Google Chrome' : (cmd.includes('safari') ? 'Safari' : 'Zen Browser');
+
+        // Hybrid Step 1: Ensure browser/app is focused natively
+        steps.push({
+            step: stepNum++,
+            action: "openApp",
+            app: targetApp,
+            label: `Focus ${targetApp}`,
+            speech: `Activating ${targetApp}.`
+        });
         // Find search input
         const searchInput = elements.find(e => e.role === 'input' && e.y < screenHeight * 0.4);
         // Find target contact or first contact in list
@@ -250,7 +367,6 @@ export function generateOmniGroundedPlan(userCommand = '', elements = [], screen
         // Find send button
         const sendBtn = elements.find(e => e.role === 'button' && (e.text.toLowerCase().includes('send') || (e.x > screenWidth * 0.7 && e.y > screenHeight * 0.6)));
 
-        let stepNum = 1;
         if (searchInput) {
             steps.push({
                 step: stepNum++,
