@@ -99,6 +99,16 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             }
         }
 
+        // Passive Global Click Monitor for interactive emotions & petting Rex
+        NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            guard let self = self else { return }
+            let mouse = NSEvent.mouseLocation
+            let webX = mouse.x
+            let webY = self.screenFrame.height - mouse.y
+            let isRight = (event.type == .rightMouseDown)
+            self.callJS("window.onUserPhysicalClick(\(webX), \(webY), \(isRight))")
+        }
+
         // 60Hz tracking timer for global mouse tracking and emergency brake detection
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             self?.tickMouseTracking()
@@ -154,29 +164,17 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         lastUserMousePos = rawPos
         accumulatedUserDelta = 0
 
+        guard mode == "follow" else { return }
+
         if rawPos != lastMousePos {
             lastMousePos = rawPos
-            callJS("window.onUserMouseActivity()")
+            // Convert Cocoa coordinates (origin at bottom-left) to Web coordinates (origin at top-left)
+            let webX = rawPos.x
+            let webY = screenFrame.size.height - rawPos.y
 
-            // Check mouse proximity to Rex Mascot Dock in bottom-right corner
-            let rexCornerX = screenFrame.width - 100
-            let rexCornerY: CGFloat = 90
-            let distToRex = hypot(rawPos.x - rexCornerX, rawPos.y - rexCornerY)
-            if distToRex < 160 {
-                callJS("window.setMascotHover(true)")
-            } else {
-                callJS("window.setMascotHover(false)")
-            }
-
-            if mode == "follow" {
-                // Convert Cocoa coordinates (origin at bottom-left) to Web coordinates (origin at top-left)
-                let webX = rawPos.x
-                let webY = screenFrame.size.height - rawPos.y
-
-                let rexX = webX + followOffsetX
-                let rexY = webY + followOffsetY
-                callJS("window.updateMousePosition(\(rexX), \(rexY), true)")
-            }
+            let rexX = webX + followOffsetX
+            let rexY = webY + followOffsetY
+            callJS("window.updateMousePosition(\(rexX), \(rexY), true)")
         }
     }
 
@@ -623,11 +621,11 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                 fflush(stdout)
 
             case "setEmotion":
-                if let emo = json["emotion"] as? String {
-                    self.callJS("window.setRexEmotion('\(emo)')")
-                    print("{\"event\":\"emotionChanged\",\"emotion\":\"\(emo)\"}")
-                    fflush(stdout)
-                }
+                let emotion = json["emotion"] as? String ?? "happy"
+                let duration = json["duration"] as? Double ?? 0
+                self.callJS("window.setRexEmotion('\(emotion)', \(duration))")
+                print("{\"event\":\"emotionChanged\",\"emotion\":\"\(emotion)\"}")
+                fflush(stdout)
 
             case "quit":
                 NSApp.terminate(nil)
@@ -655,9 +653,7 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
                 }
 
-                /* =========================================
-                   AUTONOMOUS REX CURSOR (ON-SCREEN TAKEOVER)
-                   ========================================= */
+                /* Rex Cursor Container - ultra-fluid transform */
                 #rex-container {
                     position: fixed;
                     top: 0;
@@ -669,153 +665,39 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                     will-change: transform;
                 }
 
+                /* SVG Cursor Icon */
                 .rex-cursor-icon {
                     position: absolute;
                     left: -4px;
                     top: -4px;
-                    width: 38px;
-                    height: 38px;
-                    filter: drop-shadow(0 4px 10px rgba(0,0,0,0.5));
+                    width: 36px;
+                    height: 36px;
+                    filter: drop-shadow(0 3px 8px rgba(0,0,0,0.45));
                     transition: transform 120ms ease;
                 }
                 .rex-cursor-icon.clicking {
-                    transform: scale(0.88) translate(1px, 1px);
+                    transform: scale(0.9) translate(1px, 1px);
                 }
 
-                /* REX Cursor Identification Badge */
-                .rex-cursor-badge {
+                /* 8-Bit Baby T-Rex Dinosaur (Authentic Design Preserved) */
+                .rex-dino-wrap {
                     position: absolute;
-                    left: 28px;
-                    top: 8px;
-                    display: inline-flex;
-                    align-items: center;
-                    gap: 5px;
-                    padding: 3px 8px 3px 6px;
-                    background: rgba(10, 14, 20, 0.90);
-                    -webkit-backdrop-filter: blur(20px) saturate(180%);
-                    backdrop-filter: blur(20px) saturate(180%);
-                    border: 1.2px solid rgba(56, 239, 125, 0.7);
-                    border-radius: 999px;
-                    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6), 0 0 10px rgba(56, 239, 125, 0.4);
-                    color: #38ef7d;
-                    font-size: 10px;
-                    font-weight: 800;
-                    letter-spacing: 0.12em;
-                    text-transform: uppercase;
-                    white-space: nowrap;
-                    pointer-events: none;
-                    transition: transform 120ms ease, box-shadow 120ms ease;
-                }
-                .rex-cursor-badge.clicking {
-                    transform: scale(1.12);
-                    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.65), 0 0 16px rgba(56, 239, 125, 0.8);
-                }
-                .rex-cursor-badge .badge-dot {
-                    width: 5px;
-                    height: 5px;
-                    border-radius: 50%;
-                    background: #38ef7d;
-                    box-shadow: 0 0 8px #38ef7d;
-                    animation: badge-pulse 1.8s infinite ease-in-out;
-                }
-                @keyframes badge-pulse {
-                    0%, 100% { opacity: 0.6; transform: scale(0.9); }
-                    50% { opacity: 1; transform: scale(1.25); box-shadow: 0 0 12px #38ef7d; }
-                }
-
-                /* =========================================
-                   REX MASCOT DOCK (BOTTOM-RIGHT OF SCREEN)
-                   ========================================= */
-                #rex-dock {
-                    position: fixed;
-                    right: 28px;
-                    bottom: 22px;
+                    left: 18px;
+                    top: 14px;
                     display: flex;
                     flex-direction: column;
                     align-items: center;
-                    pointer-events: none;
-                    z-index: 999990;
-                    transition: transform 300ms cubic-bezier(0.16, 1, 0.3, 1), opacity 300ms ease;
+                    filter: drop-shadow(0 6px 14px rgba(0,0,0,0.5));
+                    transition: opacity 200ms ease;
                 }
 
-                .mascot-pedestal {
-                    position: relative;
-                    display: flex;
-                    flex-direction: column;
-                    align-items: center;
-                    padding: 12px 16px 10px 16px;
-                    background: rgba(10, 14, 20, 0.78);
-                    -webkit-backdrop-filter: blur(28px) saturate(190%) contrast(105%);
-                    backdrop-filter: blur(28px) saturate(190%) contrast(105%);
-                    border: 1px solid rgba(255, 255, 255, 0.16);
-                    border-radius: 26px;
-                    box-shadow: 0 16px 42px rgba(0, 0, 0, 0.55),
-                                0 0 0 1px rgba(255, 255, 255, 0.08),
-                                0 0 32px rgba(56, 239, 125, 0.15);
-                    transition: all 260ms cubic-bezier(0.16, 1, 0.3, 1);
-                }
-                .mascot-pedestal.hovered {
-                    transform: translateY(-4px) scale(1.03);
-                    border-color: rgba(56, 239, 125, 0.55);
-                    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.65), 0 0 36px rgba(56, 239, 125, 0.35);
-                }
-
-                .mascot-avatar-wrap {
-                    position: relative;
-                    width: 128px;
-                    height: 128px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                }
-
-                /* Scaled 64x64 Canvas to 128px Prominent Display */
                 #dino-canvas {
-                    width: 128px;
-                    height: 128px;
+                    width: 58px;
+                    height: 58px;
                     image-rendering: pixelated;
-                    image-rendering: crisp-edges;
-                    filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.45));
-                    transition: transform 180ms ease;
                 }
 
-                /* Sleek Translucent Status Pill */
-                .mascot-status-pill {
-                    display: flex;
-                    align-items: center;
-                    gap: 6px;
-                    margin-top: 6px;
-                    padding: 3px 10px;
-                    background: rgba(255, 255, 255, 0.08);
-                    border: 1px solid rgba(255, 255, 255, 0.14);
-                    border-radius: 999px;
-                    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
-                    transition: all 200ms ease;
-                }
-                .status-indicator-dot {
-                    width: 6px;
-                    height: 6px;
-                    border-radius: 50%;
-                    background: #38ef7d;
-                    box-shadow: 0 0 8px #38ef7d;
-                    transition: background 200ms ease, box-shadow 200ms ease;
-                }
-                .status-name {
-                    font-size: 10px;
-                    font-weight: 800;
-                    letter-spacing: 0.12em;
-                    color: #ffffff;
-                }
-                .status-mood {
-                    font-size: 9px;
-                    font-weight: 700;
-                    letter-spacing: 0.08em;
-                    text-transform: uppercase;
-                    color: #38ef7d;
-                    transition: color 200ms ease;
-                }
-
-                /* Audio Equalizer & Mic Pulse for Listening Mode */
+                /* Audio Equalizer & Mic Pulse for Listening Mode - Translucent B&W Glass */
                 .audio-eq-wrap {
                     display: none;
                     position: absolute;
@@ -825,25 +707,24 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                     align-items: flex-end;
                     gap: 3px;
                     height: 16px;
-                    background: rgba(10, 10, 14, 0.85);
+                    background: rgba(10, 10, 14, 0.75);
                     -webkit-backdrop-filter: blur(20px) saturate(180%);
                     backdrop-filter: blur(20px) saturate(180%);
                     padding: 3px 8px;
                     border-radius: 999px;
                     border: 1px solid rgba(255, 255, 255, 0.22);
                     box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.2);
-                    z-index: 10;
                 }
                 .audio-eq-wrap.active {
                     display: flex;
                 }
                 .eq-bar {
                     width: 2.5px;
-                    background: #38ef7d;
+                    background: #ffffff;
                     height: 100%;
                     border-radius: 1.5px;
                     animation: eq-bounce 0.4s infinite alternate ease-in-out;
-                    box-shadow: 0 0 6px rgba(56, 239, 125, 0.5);
+                    box-shadow: 0 0 6px rgba(255, 255, 255, 0.5);
                 }
                 .eq-bar:nth-child(1) { animation-delay: 0.1s; }
                 .eq-bar:nth-child(2) { animation-delay: 0.25s; }
@@ -856,15 +737,14 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
 
                 .mic-indicator {
                     position: absolute;
-                    top: -4px;
-                    right: 8px;
-                    width: 9px;
-                    height: 9px;
+                    top: -3px;
+                    right: -3px;
+                    width: 8px;
+                    height: 8px;
                     border-radius: 50%;
-                    background: #38ef7d;
-                    box-shadow: 0 0 8px rgba(56, 239, 125, 0.9);
+                    background: #ffffff;
+                    box-shadow: 0 0 8px rgba(255, 255, 255, 0.9);
                     display: none;
-                    z-index: 10;
                 }
                 .mic-indicator.active {
                     display: block;
@@ -872,31 +752,27 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                 }
                 @keyframes mic-pulse {
                     0%, 100% { transform: scale(0.9); opacity: 0.7; }
-                    50% { transform: scale(1.2); opacity: 1; box-shadow: 0 0 12px #38ef7d; }
+                    50% { transform: scale(1.2); opacity: 1; box-shadow: 0 0 12px #ffffff; }
                 }
 
-                /* =========================================
-                   GLASSMORPHIC SPEECH BUBBLE (ABOVE MASCOT)
-                   ========================================= */
+                /* Translucent Black & White Glassmorphism Speech / Chat Card */
                 .rex-speech-bubble {
                     position: absolute;
-                    bottom: 195px;
-                    right: 0;
-                    min-width: 250px;
-                    max-width: 360px;
-                    padding: 14px 18px;
-                    background: rgba(10, 14, 20, 0.85);
-                    -webkit-backdrop-filter: blur(32px) saturate(190%) contrast(105%);
-                    backdrop-filter: blur(32px) saturate(190%) contrast(105%);
-                    border: 1px solid rgba(255, 255, 255, 0.2);
-                    border-radius: 18px;
-                    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.65),
-                                inset 0 1px 0 rgba(255, 255, 255, 0.24),
-                                0 0 24px rgba(56, 239, 125, 0.18);
+                    left: 68px;
+                    bottom: 26px;
+                    min-width: 220px;
+                    max-width: 320px;
+                    padding: 12px 16px;
+                    background: rgba(10, 10, 14, 0.72);
+                    -webkit-backdrop-filter: blur(30px) saturate(190%) contrast(105%);
+                    backdrop-filter: blur(30px) saturate(190%) contrast(105%);
+                    border: 1px solid rgba(255, 255, 255, 0.18);
+                    border-radius: 14px;
+                    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.24), 0 0 1px rgba(255, 255, 255, 0.3);
                     color: #ffffff;
                     opacity: 0;
-                    transform: translateY(14px) scale(0.95);
-                    transition: opacity 280ms cubic-bezier(0.16, 1, 0.3, 1), transform 300ms cubic-bezier(0.16, 1, 0.3, 1);
+                    transform: translateY(8px) scale(0.95);
+                    transition: opacity 260ms cubic-bezier(0.16, 1, 0.3, 1), transform 280ms cubic-bezier(0.16, 1, 0.3, 1);
                     pointer-events: none;
                     z-index: 1000000;
                 }
@@ -907,14 +783,16 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                 .rex-speech-bubble::before {
                     content: '';
                     position: absolute;
-                    bottom: -6px;
-                    right: 56px;
-                    width: 12px;
-                    height: 12px;
-                    background: rgba(10, 14, 20, 0.85);
-                    border-right: 1px solid rgba(255, 255, 255, 0.2);
-                    border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+                    left: -6px;
+                    bottom: 16px;
+                    width: 11px;
+                    height: 11px;
+                    background: rgba(10, 10, 14, 0.72);
+                    border-left: 1px solid rgba(255, 255, 255, 0.18);
+                    border-bottom: 1px solid rgba(255, 255, 255, 0.18);
                     transform: rotate(45deg);
+                    -webkit-backdrop-filter: blur(30px);
+                    backdrop-filter: blur(30px);
                 }
                 .bubble-header {
                     display: flex;
@@ -926,17 +804,17 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                     width: 6px;
                     height: 6px;
                     border-radius: 50%;
-                    background: #38ef7d;
-                    box-shadow: 0 0 8px rgba(56, 239, 125, 0.85);
+                    background: #ffffff;
+                    box-shadow: 0 0 8px rgba(255, 255, 255, 0.85);
                     animation: dot-pulse 2s infinite ease-in-out;
                 }
                 @keyframes dot-pulse {
                     0%, 100% { opacity: 0.6; transform: scale(0.9); }
-                    50% { opacity: 1; transform: scale(1.15); box-shadow: 0 0 12px #38ef7d; }
+                    50% { opacity: 1; transform: scale(1.15); box-shadow: 0 0 12px #ffffff; }
                 }
                 .bubble-title {
                     font-size: 10px;
-                    font-weight: 800;
+                    font-weight: 700;
                     letter-spacing: 0.12em;
                     text-transform: uppercase;
                     color: #ffffff;
@@ -944,14 +822,14 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                 .bubble-badge {
                     margin-left: auto;
                     font-size: 9px;
-                    font-weight: 700;
+                    font-weight: 600;
                     letter-spacing: 0.08em;
                     text-transform: uppercase;
                     padding: 2px 7px;
-                    background: rgba(56, 239, 125, 0.12);
-                    border: 1px solid rgba(56, 239, 125, 0.28);
+                    background: rgba(255, 255, 255, 0.1);
+                    border: 1px solid rgba(255, 255, 255, 0.16);
                     border-radius: 999px;
-                    color: #38ef7d;
+                    color: rgba(255, 255, 255, 0.8);
                 }
                 .bubble-body {
                     font-size: 13px;
@@ -962,17 +840,15 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                     letter-spacing: -0.01em;
                 }
 
-                /* =========================================
-                   INTERACTIVE CLICK RIPPLE & SPOTLIGHT BOX
-                   ========================================= */
+                /* Click Pulse Rings - Frosted White Glass */
                 .click-ripple {
                     position: fixed;
                     width: 16px;
                     height: 16px;
                     border-radius: 50%;
-                    border: 2px solid rgba(56, 239, 125, 0.95);
-                    background: radial-gradient(circle, rgba(56, 239, 125, 0.25) 0%, transparent 70%);
-                    box-shadow: 0 0 18px rgba(56, 239, 125, 0.7), inset 0 0 10px rgba(56, 239, 125, 0.4);
+                    border: 2px solid rgba(255, 255, 255, 0.95);
+                    background: radial-gradient(circle, rgba(255, 255, 255, 0.25) 0%, transparent 70%);
+                    box-shadow: 0 0 18px rgba(255, 255, 255, 0.7), inset 0 0 10px rgba(255, 255, 255, 0.4);
                     pointer-events: none;
                     transform: translate(-50%, -50%) scale(1);
                     animation: ripple-wave 500ms cubic-bezier(0.1, 0.8, 0.3, 1) forwards;
@@ -983,13 +859,14 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                     100% { transform: translate(-50%, -50%) scale(4.8); opacity: 0; border-width: 1px; }
                 }
 
+                /* Region Highlighter Box - Translucent Glassmorphic Spotlight */
                 #highlight-box {
                     position: fixed;
-                    border: 1.5px solid rgba(56, 239, 125, 0.75);
-                    background: rgba(56, 239, 125, 0.06);
+                    border: 1.5px solid rgba(255, 255, 255, 0.75);
+                    background: rgba(255, 255, 255, 0.05);
                     -webkit-backdrop-filter: blur(12px);
                     backdrop-filter: blur(12px);
-                    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.15), 0 0 24px rgba(56, 239, 125, 0.25);
+                    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.15), 0 0 24px rgba(255, 255, 255, 0.18);
                     border-radius: 10px;
                     pointer-events: none;
                     display: none;
@@ -1000,16 +877,16 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                     position: absolute;
                     top: -28px;
                     left: 0;
-                    background: rgba(10, 14, 20, 0.90);
+                    background: rgba(10, 10, 14, 0.85);
                     -webkit-backdrop-filter: blur(16px);
                     backdrop-filter: blur(16px);
-                    color: #38ef7d;
+                    color: #ffffff;
                     font-size: 11px;
-                    font-weight: 700;
+                    font-weight: 600;
                     letter-spacing: 0.04em;
                     padding: 3px 10px;
                     border-radius: 999px;
-                    border: 1px solid rgba(56, 239, 125, 0.35);
+                    border: 1px solid rgba(255, 255, 255, 0.22);
                     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
                 }
             </style>
@@ -1020,29 +897,10 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                 <div id="highlight-tag">Rex Spotlight</div>
             </div>
 
-            <!-- Autonomous Screen Cursor with REX Badge -->
+            <!-- Rex Persistent Cursor Container -->
             <div id="rex-container">
                 <div class="rex-cursor-icon" id="cursor-icon"></div>
-                <div class="rex-cursor-badge" id="cursor-badge">
-                    <span class="badge-dot"></span>
-                    <span class="badge-label">REX</span>
-                </div>
-            </div>
-
-            <!-- Rex Desktop Mascot Dock (Bottom-Right Screen) -->
-            <div id="rex-dock">
-                <!-- Speech Bubble -->
-                <div class="rex-speech-bubble" id="speech-bubble">
-                    <div class="bubble-header">
-                        <span class="bubble-dot"></span>
-                        <span class="bubble-title">REX COPILOT</span>
-                        <span class="bubble-badge" id="bubble-badge">READY</span>
-                    </div>
-                    <div class="bubble-body" id="bubble-text">Ready.</div>
-                </div>
-
-                <!-- Mascot Pedestal -->
-                <div class="mascot-pedestal" id="mascot-pedestal">
+                <div class="rex-dino-wrap" id="dino-wrap">
                     <div class="audio-eq-wrap" id="audio-eq">
                         <div class="eq-bar"></div>
                         <div class="eq-bar"></div>
@@ -1050,354 +908,397 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                         <div class="eq-bar"></div>
                     </div>
                     <div class="mic-indicator" id="mic-indicator"></div>
-
-                    <div class="mascot-avatar-wrap">
-                        <canvas id="dino-canvas" width="64" height="64"></canvas>
+                    <canvas id="dino-canvas" width="40" height="40"></canvas>
+                </div>
+                <div class="rex-speech-bubble" id="speech-bubble">
+                    <div class="bubble-header">
+                        <span class="bubble-dot"></span>
+                        <span class="bubble-title">REX</span>
+                        <span class="bubble-badge" id="bubble-badge">COPILOT</span>
                     </div>
-
-                    <div class="mascot-status-pill">
-                        <span class="status-indicator-dot" id="status-dot"></span>
-                        <span class="status-name">REX</span>
-                        <span class="status-mood" id="mascot-mood-tag">IDLE</span>
-                    </div>
+                    <div class="bubble-body" id="bubble-text"></div>
                 </div>
             </div>
 
             <script>
-                // SVG Cursors
+                // SVG Assets
                 const SVGS = {
-                    default: `<svg height="38" viewBox="0 0 32 32" width="38" xmlns="http://www.w3.org/2000/svg"><g fill="none" fill-rule="evenodd" transform="translate(10 7)"><path d="m6.148 18.473 1.863-1.003 1.615-.839-2.568-4.816h4.332l-11.379-11.408v16.015l3.316-3.221z" fill="#38ef7d"/><path d="m6.431 17 1.765-.941-2.775-5.202h3.604l-8.025-8.043v11.188l2.53-2.442z" fill="#0f172a"/></g></svg>`,
-                    handpointing: `<svg height="38" viewBox="0 0 32 32" width="38" xmlns="http://www.w3.org/2000/svg"><g fill="none" fill-rule="evenodd" transform="translate(7 6)"><path d="m4.55 8.57c-.1-.37-.2-.85-.4-1.55-.17-.56-.34-.86-.47-1.23-.15-.46-.3-.72-.5-1.18-.14-.33-.36-1.05-.46-1.44-.12-.51.03-.92.24-1.21.25-.34.96-.49 1.36-.35.37.13.74.51.92.79.29.46.36.63.72 1.54.39.99.56 1.92.61 2.23l.08.45c0-.04-.04-1.12-.04-1.16-.04-1.03-.06-1.82-.04-2.94.01-.13.06-.59.08-.72.08-.5.3-.8.67-.98.41-.2.93-.21 1.4-.02.42.17.63.55.69 1.02.01.11.09.99.09 1.11-.01 1.02.01 1.64.02 2.17 0 .23 0 1.62.01 1.47.06-.66.09-3.19.34-3.94.14-.43.41-.75.8-.93.43-.2 1.11-.07 1.4.24.29.31.45.69.48 1.15.03.41-.02.9-.02 1.25 0 .87-.02 1.32-.04 2.12 0 .04-.01.3.02.18.1-.28.19-.54.27-.75.05-.12.24-.61.36-.86.11-.23.21-.37.41-.69.2-.31.42-.45.67-.56.54-.23 1.11.11 1.3.59.09.22.01.71-.03 1.1-.06.65-.25 1.31-.35 1.65-.13.45-.27 1.24-.34 1.6-.07.4-.23 1.39-.36 1.82-.09.3-.37.98-.65 1.39 0 0-1.07 1.25-1.19 1.81-.12.56-.08.57-.1.97-.02.4.12.92.12.92s-.8.1-1.23.03c-.39-.06-.88-.84-1-1.08-.17-.33-.54-.26-.68-.02-.23.38-.71 1.07-1.05 1.11-.67.08-2.05.03-3.14.02 0 0 .19-1.01-.23-1.36-.3-.26-.83-.78-1.14-1.06l-.83-.92c-.28-.36-.63-1.09-1.24-1.99-.35-.5-1.03-1.08-1.29-1.58-.22-.42-.33-.95-.19-1.32.23-.6.68-.9 1.36-.83.52.05.85.2 1.24.53.22.19.57.54.75.75.16.2.2.28.38.51.23.31.3.46.21.12" fill="#38ef7d"/><g stroke="#0f172a" stroke-linecap="round" stroke-width=".75"><path d="m4.55 8.57c-.1-.37-.2-.85-.4-1.55-.17-.56-.34-.86-.47-1.23-.15-.46-.3-.72-.5-1.18-.14-.33-.36-1.05-.46-1.44-.12-.51.03-.92.24-1.21.25-.34.96-.49 1.36-.35.37.13.74.51.92.79.29.46.36.63.72 1.54.39.99.56 1.92.61 2.23l.08.45c0-.04-.04-1.12-.04-1.16-.04-1.03-.06-1.82-.04-2.94.01-.13.06-.59.08-.72.08-.5.3-.8.67-.98.41-.2.93-.21 1.4-.02.42.17.63.55.69 1.02.01.11.09.99.09 1.11-.01 1.02.01 1.64.02 2.17 0 .23 0 1.62.01 1.47.06-.66.09-3.19.34-3.94.14-.43.41-.75.8-.93.43-.2 1.11-.07 1.4.24.29.31.45.69.48 1.15.03.41-.02.9-.02 1.25 0 .87-.02 1.32-.04 2.12 0 .04-.01.3.02.18.1-.28.19-.54.27-.75.05-.12.24-.61.36-.86.11-.23.21-.37.41-.69.2-.31.42-.45.67-.56.54-.23 1.11.11 1.3.59.09.22.01.71-.03 1.1-.06.65-.25 1.31-.35 1.65-.13.45-.27 1.24-.34 1.6-.07.4-.23 1.39-.36 1.82-.09.3-.37.98-.65 1.39 0 0-1.07 1.25-1.19 1.81-.12.56-.08.57-.1.97-.02.4.12.92.12.92s-.8.1-1.23.03c-.39-.06-.88-.84-1-1.08-.17-.33-.54-.26-.68-.02-.23.38-.71 1.07-1.05 1.11-.67.08-2.05.03-3.14.02 0 0 .19-1.01-.23-1.36-.3-.26-.83-.78-1.14-1.06l-.83-.92c-.28-.36-.63-1.09-1.24-1.99-.35-.5-1.03-1.08-1.29-1.58-.22-.42-.33-.95-.19-1.32.23-.6.68-.9 1.36-.83.52.05.85.2 1.24.53.22.19.57.54.75.75.16.2.2.28.38.51.23.31.3.46.21.12" stroke-linejoin="round"/></g></svg>`,
-                    handopen: `<svg height="38" viewBox="0 0 32 32" width="38" xmlns="http://www.w3.org/2000/svg"><g fill="#38ef7d" stroke="#0f172a" stroke-width=".8"><path d="M12 6a2 2 0 0 1 2 2v6h1V4a2 2 0 0 1 2-2 2 2 0 0 1 2 2v10h1V6a2 2 0 0 1 2-2 2 2 0 0 1 2 2v8h1V9a2 2 0 0 1 2-2 2 2 0 0 1 2 2v11c0 5-4 9-9 9s-9-4-9-9V12a2 2 0 0 1 2-2 2 2 0 0 1 2 2v2h1V8a2 2 0 0 1 2-2z"/></g></svg>`,
-                    busy: `<svg height="38" viewBox="0 0 32 32" width="38" xmlns="http://www.w3.org/2000/svg"><circle cx="16" cy="16" r="12" fill="none" stroke="#38ef7d" stroke-width="3" stroke-dasharray="16 8"><animateTransform attributeName="transform" type="rotate" from="0 16 16" to="360 16 16" dur="0.9s" repeatCount="indefinite"/></circle><circle cx="16" cy="16" r="4" fill="#38ef7d"/></svg>`,
-                    beachball: `<svg height="38" viewBox="0 0 32 32" width="38" xmlns="http://www.w3.org/2000/svg"><g><animateTransform attributeName="transform" type="rotate" from="0 16 16" to="360 16 16" dur="1s" repeatCount="indefinite"/><circle cx="16" cy="16" r="14" fill="#38ef7d"/><path d="M16 2A14 14 0 0 1 30 16L16 16Z" fill="#f1c40f"/><path d="M16 16L30 16A14 14 0 0 1 16 30Z" fill="#e74c3c"/><path d="M16 16L16 30A14 14 0 0 1 2 16Z" fill="#3498db"/></g></svg>`,
-                    handgrabbing: `<svg height="38" viewBox="0 0 32 32" width="38" xmlns="http://www.w3.org/2000/svg"><path d="M10 14a3 3 0 0 1 6 0v2h2v-2a3 3 0 0 1 6 0v6c0 4-3 7-7 7s-7-3-7-7z" fill="#38ef7d" stroke="#0f172a" stroke-width="1"/></svg>`,
-                    copy: `<svg height="38" viewBox="0 0 32 32" width="38" xmlns="http://www.w3.org/2000/svg"><g fill="#38ef7d"><path d="M8 8h12v14H8z"/><path d="M12 4h12v14h-2V6H12z" fill="#a7f3d0"/><path d="M14 13h-2v4h-4v2h4v4h2v-4h4v-2h-4z" fill="#0f172a"/></g></svg>`
+                    default: `<svg height="36" viewBox="0 0 32 32" width="36" xmlns="http://www.w3.org/2000/svg"><g fill="none" fill-rule="evenodd" transform="translate(10 7)"><path d="m6.148 18.473 1.863-1.003 1.615-.839-2.568-4.816h4.332l-11.379-11.408v16.015l3.316-3.221z" fill="#38ef7d"/><path d="m6.431 17 1.765-.941-2.775-5.202h3.604l-8.025-8.043v11.188l2.53-2.442z" fill="#0f172a"/></g></svg>`,
+                    handpointing: `<svg height="36" viewBox="0 0 32 32" width="36" xmlns="http://www.w3.org/2000/svg"><g fill="none" fill-rule="evenodd" transform="translate(7 6)"><path d="m4.55 8.57c-.1-.37-.2-.85-.4-1.55-.17-.56-.34-.86-.47-1.23-.15-.46-.3-.72-.5-1.18-.14-.33-.36-1.05-.46-1.44-.12-.51.03-.92.24-1.21.25-.34.96-.49 1.36-.35.37.13.74.51.92.79.29.46.36.63.72 1.54.39.99.56 1.92.61 2.23l.08.45c0-.04-.04-1.12-.04-1.16-.04-1.03-.06-1.82-.04-2.94.01-.13.06-.59.08-.72.08-.5.3-.8.67-.98.41-.2.93-.21 1.4-.02.42.17.63.55.69 1.02.01.11.09.99.09 1.11-.01 1.02.01 1.64.02 2.17 0 .23 0 1.62.01 1.47.06-.66.09-3.19.34-3.94.14-.43.41-.75.8-.93.43-.2 1.11-.07 1.4.24.29.31.45.69.48 1.15.03.41-.02.9-.02 1.25 0 .87-.02 1.32-.04 2.12 0 .04-.01.3.02.18.1-.28.19-.54.27-.75.05-.12.24-.61.36-.86.11-.23.21-.37.41-.69.2-.31.42-.45.67-.56.54-.23 1.11.11 1.3.59.09.22.01.71-.03 1.1-.06.65-.25 1.31-.35 1.65-.13.45-.27 1.24-.34 1.6-.07.4-.23 1.39-.36 1.82-.09.3-.37.98-.65 1.39 0 0-1.07 1.25-1.19 1.81-.12.56-.08.57-.1.97-.02.4.12.92.12.92s-.8.1-1.23.03c-.39-.06-.88-.84-1-1.08-.17-.33-.54-.26-.68-.02-.23.38-.71 1.07-1.05 1.11-.67.08-2.05.03-3.14.02 0 0 .19-1.01-.23-1.36-.3-.26-.83-.78-1.14-1.06l-.83-.92c-.28-.36-.63-1.09-1.24-1.99-.35-.5-1.03-1.08-1.29-1.58-.22-.42-.33-.95-.19-1.32.23-.6.68-.9 1.36-.83.52.05.85.2 1.24.53.22.19.57.54.75.75.16.2.2.28.38.51.23.31.3.46.21.12" fill="#38ef7d"/><g stroke="#0f172a" stroke-linecap="round" stroke-width=".75"><path d="m4.55 8.57c-.1-.37-.2-.85-.4-1.55-.17-.56-.34-.86-.47-1.23-.15-.46-.3-.72-.5-1.18-.14-.33-.36-1.05-.46-1.44-.12-.51.03-.92.24-1.21.25-.34.96-.49 1.36-.35.37.13.74.51.92.79.29.46.36.63.72 1.54.39.99.56 1.92.61 2.23l.08.45c0-.04-.04-1.12-.04-1.16-.04-1.03-.06-1.82-.04-2.94.01-.13.06-.59.08-.72.08-.5.3-.8.67-.98.41-.2.93-.21 1.4-.02.42.17.63.55.69 1.02.01.11.09.99.09 1.11-.01 1.02.01 1.64.02 2.17 0 .23 0 1.62.01 1.47.06-.66.09-3.19.34-3.94.14-.43.41-.75.8-.93.43-.2 1.11-.07 1.4.24.29.31.45.69.48 1.15.03.41-.02.9-.02 1.25 0 .87-.02 1.32-.04 2.12 0 .04-.01.3.02.18.1-.28.19-.54.27-.75.05-.12.24-.61.36-.86.11-.23.21-.37.41-.69.2-.31.42-.45.67-.56.54-.23 1.11.11 1.3.59.09.22.01.71-.03 1.1-.06.65-.25 1.31-.35 1.65-.13.45-.27 1.24-.34 1.6-.07.4-.23 1.39-.36 1.82-.09.3-.37.98-.65 1.39 0 0-1.07 1.25-1.19 1.81-.12.56-.08.57-.1.97-.02.4.12.92.12.92s-.8.1-1.23.03c-.39-.06-.88-.84-1-1.08-.17-.33-.54-.26-.68-.02-.23.38-.71 1.07-1.05 1.11-.67.08-2.05.03-3.14.02 0 0 .19-1.01-.23-1.36-.3-.26-.83-.78-1.14-1.06l-.83-.92c-.28-.36-.63-1.09-1.24-1.99-.35-.5-1.03-1.08-1.29-1.58-.22-.42-.33-.95-.19-1.32.23-.6.68-.9 1.36-.83.52.05.85.2 1.24.53.22.19.57.54.75.75.16.2.2.28.38.51.23.31.3.46.21.12" stroke-linejoin="round"/></g></svg>`,
+                    handopen: `<svg height="36" viewBox="0 0 32 32" width="36" xmlns="http://www.w3.org/2000/svg"><g fill="#38ef7d" stroke="#0f172a" stroke-width=".8"><path d="M12 6a2 2 0 0 1 2 2v6h1V4a2 2 0 0 1 2-2 2 2 0 0 1 2 2v10h1V6a2 2 0 0 1 2-2 2 2 0 0 1 2 2v8h1V9a2 2 0 0 1 2-2 2 2 0 0 1 2 2v11c0 5-4 9-9 9s-9-4-9-9V12a2 2 0 0 1 2-2 2 2 0 0 1 2 2v2h1V8a2 2 0 0 1 2-2z"/></g></svg>`,
+                    busy: `<svg height="36" viewBox="0 0 32 32" width="36" xmlns="http://www.w3.org/2000/svg"><circle cx="16" cy="16" r="12" fill="none" stroke="#38ef7d" stroke-width="3" stroke-dasharray="16 8"><animateTransform attributeName="transform" type="rotate" from="0 16 16" to="360 16 16" dur="0.9s" repeatCount="indefinite"/></circle><circle cx="16" cy="16" r="4" fill="#38ef7d"/></svg>`,
+                    beachball: `<svg height="36" viewBox="0 0 32 32" width="36" xmlns="http://www.w3.org/2000/svg"><g><animateTransform attributeName="transform" type="rotate" from="0 16 16" to="360 16 16" dur="1s" repeatCount="indefinite"/><circle cx="16" cy="16" r="14" fill="#38ef7d"/><path d="M16 2A14 14 0 0 1 30 16L16 16Z" fill="#f1c40f"/><path d="M16 16L30 16A14 14 0 0 1 16 30Z" fill="#e74c3c"/><path d="M16 16L16 30A14 14 0 0 1 2 16Z" fill="#3498db"/></g></svg>`,
+                    handgrabbing: `<svg height="36" viewBox="0 0 32 32" width="36" xmlns="http://www.w3.org/2000/svg"><path d="M10 14a3 3 0 0 1 6 0v2h2v-2a3 3 0 0 1 6 0v6c0 4-3 7-7 7s-7-3-7-7z" fill="#38ef7d" stroke="#0f172a" stroke-width="1"/></svg>`,
+                    copy: `<svg height="36" viewBox="0 0 32 32" width="36" xmlns="http://www.w3.org/2000/svg"><g fill="#38ef7d"><path d="M8 8h12v14H8z"/><path d="M12 4h12v14h-2V6H12z" fill="#a7f3d0"/><path d="M14 13h-2v4h-4v2h4v4h2v-4h4v-2h-4z" fill="#0f172a"/></g></svg>`
                 };
 
                 const container = document.getElementById('rex-container');
                 const cursorIcon = document.getElementById('cursor-icon');
-                const cursorBadge = document.getElementById('cursor-badge');
+                const dinoWrap = document.getElementById('dino-wrap');
                 const speechBubble = document.getElementById('speech-bubble');
                 const highlightBox = document.getElementById('highlight-box');
                 const highlightTag = document.getElementById('highlight-tag');
-                const mascotPedestal = document.getElementById('mascot-pedestal');
-                const mascotMoodTag = document.getElementById('mascot-mood-tag');
-                const statusDot = document.getElementById('status-dot');
 
                 let curX = 200, curY = 200;
                 let targetX = 200, targetY = 200;
                 let curStyle = 'default';
-                let curMode = 'autonomous';
+                let curMode = 'follow';
                 let curAppearance = 'both';
                 let speechTimer = null;
                 let isAutonomousMoving = false;
-                let idleTimerSeconds = 0;
 
                 cursorIcon.innerHTML = SVGS.default;
 
-                // =========================================
-                // 8-BIT BABY T-REX 64x64 CANVAS & EMOTIONS
-                // =========================================
+                // 8-Bit Baby T-Rex Canvas Animation & Emotional Life Engine
                 const canvas = document.getElementById('dino-canvas');
                 const ctx = canvas.getContext('2d');
                 ctx.imageSmoothingEnabled = false;
 
                 let frameCount = 0;
-                let dinoEmotion = 'idle'; // 'idle', 'happy', 'sad', 'angry', 'crying', 'sleepy', 'thinking', 'excited', 'shocked'
+                let dinoState = 'idle'; // 'idle', 'walk', 'speak', 'happy'
+                let currentEmotion = 'happy'; // 'happy', 'sad', 'angry', 'crying', 'sleepy', 'love', 'surprised', 'excited', 'dizzy', 'curious'
+                let defaultEmotion = 'happy';
+                let emotionLockUntil = 0;
                 let isBlinking = false;
                 let mouthOpen = false;
 
+                // Interactive Behavior State
+                let lastMouseMoveTime = Date.now();
+                let clickHistory = [];
+                let consecutiveFastFrames = 0;
+                let isSleeping = false;
+
                 const C = {
-                    g1: '#38ef7d', // vibrant green
-                    g2: '#11998e', // medium green shading
-                    g3: '#0b5345', // dark green outline / spikes
-                    y1: '#f9ca24', // belly yellow
-                    y2: '#f0932b', // belly shading
-                    w: '#ffffff',  // white
-                    k: '#130f40',  // dark pupil / outline
-                    p: '#ff7979',  // blush pink
-                    o: '#eb4d4b',  // mouth red
-                    b: '#48dbfb',  // tear blue
-                    r: '#ff4757',  // anger red
-                    gold: '#ffd32a'// star eyes yellow
+                    g1: '#38ef7d', g2: '#11998e', g3: '#0b5345',
+                    y1: '#f9ca24', y2: '#f0932b', w: '#ffffff',
+                    k: '#130f40', p: '#ff7979', o: '#eb4d4b',
+                    b1: '#70a1ff', b2: '#1e90ff', z: '#dfe4ea', v: '#a55eea'
                 };
-
-                const MOOD_CONFIG = {
-                    idle: { label: 'IDLE', color: '#38ef7d', dot: '#38ef7d' },
-                    happy: { label: 'HAPPY', color: '#38ef7d', dot: '#38ef7d' },
-                    excited: { label: 'EXCITED', color: '#2ed573', dot: '#2ed573' },
-                    thinking: { label: 'THINKING', color: '#f1c40f', dot: '#f1c40f' },
-                    sleepy: { label: 'SLEEPY', color: '#a29bfe', dot: '#a29bfe' },
-                    sad: { label: 'SAD', color: '#70a1ff', dot: '#70a1ff' },
-                    crying: { label: 'CRYING', color: '#48dbfb', dot: '#48dbfb' },
-                    angry: { label: 'ANGRY', color: '#ff4757', dot: '#ff4757' },
-                    shocked: { label: 'SHOCKED', color: '#ff9f43', dot: '#ff9f43' }
-                };
-
-                function updateMoodTag(emotion) {
-                    const cfg = MOOD_CONFIG[emotion] || MOOD_CONFIG.idle;
-                    if (mascotMoodTag) {
-                        mascotMoodTag.textContent = cfg.label;
-                        mascotMoodTag.style.color = cfg.color;
-                    }
-                    if (statusDot) {
-                        statusDot.style.background = cfg.dot;
-                        statusDot.style.boxShadow = `0 0 8px ${cfg.dot}`;
-                    }
-                }
 
                 function drawRect(x, y, w, h, col) {
                     ctx.fillStyle = col;
-                    ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+                    ctx.fillRect(x, y, w, h);
                 }
 
-                // Floating emotion particles system
-                let particles = [];
-
-                function updateAndDrawParticles() {
-                    // Spawn particles based on emotion
-                    if (dinoEmotion === 'sleepy' && frameCount % 35 === 0) {
-                        particles.push({
-                            x: 25, y: 10,
-                            vx: 0.15, vy: -0.35,
-                            text: ['Z', 'z', '·'][particles.length % 3],
-                            color: '#a29bfe', size: 8, life: 70, maxLife: 70
-                        });
-                    } else if ((dinoEmotion === 'happy' || dinoEmotion === 'excited') && frameCount % 22 === 0) {
-                        particles.push({
-                            x: 12 + Math.random() * 16, y: 12,
-                            vx: (Math.random() - 0.5) * 0.3, vy: -0.5,
-                            text: ['✦', '✨', '★'][Math.floor(Math.random() * 3)],
-                            color: '#ffd32a', size: 7, life: 50, maxLife: 50
-                        });
-                    } else if (dinoEmotion === 'angry' && frameCount % 20 === 0) {
-                        particles.push({
-                            x: 14 + Math.random() * 8, y: 6,
-                            vx: (Math.random() - 0.5) * 0.25, vy: -0.4,
-                            text: '♨',
-                            color: 'rgba(255, 255, 255, 0.75)', size: 8, life: 40, maxLife: 40
-                        });
-                    } else if (dinoEmotion === 'shocked' && particles.length === 0) {
-                        particles.push({
-                            x: 20, y: 4,
-                            vx: 0, vy: -0.15,
-                            text: '!',
-                            color: '#ff4757', size: 10, life: 45, maxLife: 45
-                        });
+                function drawPixelZ(x, y, s, col) {
+                    if (s <= 2) {
+                        drawRect(x, y, 3, 1, col);
+                        drawRect(x + 1, y + 1, 1, 1, col);
+                        drawRect(x, y + 2, 3, 1, col);
+                    } else {
+                        drawRect(x, y, 4, 1, col);
+                        drawRect(x + 2, y + 1, 1, 1, col);
+                        drawRect(x + 1, y + 2, 1, 1, col);
+                        drawRect(x, y + 3, 4, 1, col);
                     }
+                }
 
-                    // Render particles
-                    for (let i = particles.length - 1; i >= 0; i--) {
-                        const p = particles[i];
-                        p.x += p.vx;
-                        p.y += p.vy;
-                        p.life--;
-                        const alpha = Math.max(0, p.life / p.maxLife);
-                        ctx.save();
-                        ctx.globalAlpha = alpha;
-                        ctx.fillStyle = p.color;
-                        ctx.font = `bold ${p.size}px monospace`;
-                        ctx.fillText(p.text, p.x, p.y);
-                        ctx.restore();
-                        if (p.life <= 0) particles.splice(i, 1);
-                    }
+                function drawPixelHeart(x, y, col) {
+                    drawRect(x, y, 2, 1, col);
+                    drawRect(x + 3, y, 2, 1, col);
+                    drawRect(x - 1, y + 1, 7, 2, col);
+                    drawRect(x, y + 3, 5, 1, col);
+                    drawRect(x + 1, y + 4, 3, 1, col);
+                    drawRect(x + 2, y + 5, 1, 1, col);
                 }
 
                 function renderDino() {
-                    ctx.clearRect(0, 0, 64, 64);
-                    ctx.save();
-                    ctx.scale(2, 2);
+                    ctx.clearRect(0, 0, 40, 40);
 
+                    const activeEmotion = currentEmotion;
                     let bounceY = 0;
-                    if (dinoEmotion === 'idle') {
-                        bounceY = (Math.floor(frameCount / 30) % 2 === 0) ? 0 : 1;
-                    } else if (dinoEmotion === 'happy' || dinoEmotion === 'excited') {
+                    let swayX = 0;
+                    let microShake = 0;
+
+                    if (activeEmotion === 'sleepy') {
+                        // Slow rhythmic breathing
+                        bounceY = Math.round(Math.sin(frameCount * 0.06) * 1.5);
+                    } else if (activeEmotion === 'crying') {
+                        // High frequency sorrowful tremble
+                        microShake = (frameCount % 4 < 2) ? -1 : 1;
+                        bounceY = (Math.floor(frameCount / 10) % 2 === 0) ? 0 : 1;
+                    } else if (activeEmotion === 'angry') {
+                        // Aggressive stompy bounce
+                        bounceY = (Math.floor(frameCount / 7) % 2 === 0) ? 0 : 2;
+                    } else if (activeEmotion === 'dizzy') {
+                        // Drunken wobbly sway
+                        swayX = Math.round(Math.sin(frameCount * 0.22) * 2);
+                        bounceY = (Math.floor(frameCount / 12) % 2 === 0) ? 0 : 1;
+                    } else if (activeEmotion === 'excited' || activeEmotion === 'happy' || activeEmotion === 'love') {
+                        bounceY = (Math.floor(frameCount / 6) % 2 === 0) ? 0 : 3;
+                    } else if (activeEmotion === 'surprised') {
+                        bounceY = (Math.floor(frameCount / 5) % 2 === 0) ? 1 : 4;
+                    } else if (dinoState === 'walk') {
                         bounceY = (Math.floor(frameCount / 8) % 2 === 0) ? 0 : 2;
-                    } else if (dinoEmotion === 'angry') {
-                        bounceY = (Math.floor(frameCount / 6) % 2 === 0) ? 0 : 1;
-                    } else if (dinoEmotion === 'shocked') {
-                        bounceY = 2;
-                    } else if (dinoEmotion === 'sad') {
-                        bounceY = -1;
-                    }
-
-                    let y0 = 4 - bounceY;
-                    if (dinoEmotion === 'sleepy') {
-                        y0 = 4 + (Math.sin(frameCount * 0.05) > 0 ? 1 : 0);
-                    }
-
-                    let shakeX = 0;
-                    if (dinoEmotion === 'crying') {
-                        shakeX = (frameCount % 4 < 2) ? 1 : 0;
-                    }
-
-                    // 1. Spikes on back
-                    drawRect(9 + shakeX, y0 + 5, 2, 2, C.g3);
-                    drawRect(8 + shakeX, y0 + 9, 2, 2, C.g3);
-                    drawRect(7 + shakeX, y0 + 13, 2, 2, C.g3);
-
-                    // 2. Head
-                    drawRect(11 + shakeX, y0 + 3, 13, 11, C.g1);
-                    drawRect(24 + shakeX, y0 + 6, 4, 8, C.g1);
-                    drawRect(10 + shakeX, y0 + 4, 1, 9, C.g3);
-                    drawRect(11 + shakeX, y0 + 2, 13, 1, C.g3);
-                    drawRect(24 + shakeX, y0 + 5, 4, 1, C.g3);
-                    drawRect(28 + shakeX, y0 + 6, 1, 7, C.g3);
-                    drawRect(11 + shakeX, y0 + 12, 13, 2, C.g2);
-                    drawRect(24 + shakeX, y0 + 12, 3, 2, C.g2);
-
-                    // 3. Eyes based on Emotion
-                    if (dinoEmotion === 'sleepy') {
-                        // Closed sleeping lines: - -
-                        drawRect(17 + shakeX, y0 + 7, 5, 1, C.k);
-                        drawRect(17 + shakeX, y0 + 8, 1, 1, C.k);
-                        drawRect(21 + shakeX, y0 + 8, 1, 1, C.k);
-                    } else if (dinoEmotion === 'happy') {
-                        // Curved happy eyes ^ ^
-                        drawRect(17 + shakeX, y0 + 7, 1, 2, C.k);
-                        drawRect(18 + shakeX, y0 + 6, 3, 1, C.k);
-                        drawRect(21 + shakeX, y0 + 7, 1, 2, C.k);
-                    } else if (dinoEmotion === 'excited') {
-                        // Golden star eyes ★
-                        drawRect(18 + shakeX, y0 + 5, 3, 5, C.gold);
-                        drawRect(17 + shakeX, y0 + 6, 5, 3, C.gold);
-                        drawRect(19 + shakeX, y0 + 7, 1, 1, C.w);
-                    } else if (dinoEmotion === 'angry') {
-                        // Furrowed slanting brow & fierce red-tinted eye
-                        drawRect(16 + shakeX, y0 + 4, 2, 1, C.k);
-                        drawRect(18 + shakeX, y0 + 5, 3, 1, C.k);
-                        drawRect(21 + shakeX, y0 + 6, 2, 1, C.k);
-                        drawRect(18 + shakeX, y0 + 7, 3, 2, C.k);
-                        drawRect(18 + shakeX, y0 + 7, 1, 1, C.r);
-                    } else if (dinoEmotion === 'crying') {
-                        // Teary eyes with streaming animated teardrops
-                        drawRect(17 + shakeX, y0 + 5, 5, 5, C.w);
-                        drawRect(18 + shakeX, y0 + 6, 3, 4, C.k);
-                        drawRect(19 + shakeX, y0 + 7, 2, 2, C.b);
-                        const tearOff = (frameCount * 2) % 12;
-                        drawRect(16 + shakeX, y0 + 10 + Math.min(8, tearOff), 2, 2, C.b);
-                        drawRect(20 + shakeX, y0 + 11 + Math.min(7, (tearOff + 5) % 12), 2, 2, C.b);
-                    } else if (dinoEmotion === 'sad') {
-                        // Drooped eyelids
-                        drawRect(17 + shakeX, y0 + 5, 5, 5, C.w);
-                        drawRect(17 + shakeX, y0 + 5, 5, 2, C.g1);
-                        drawRect(18 + shakeX, y0 + 7, 3, 3, C.k);
-                    } else if (dinoEmotion === 'shocked') {
-                        // Huge shocked eyes with tiny pupil
-                        drawRect(16 + shakeX, y0 + 4, 6, 6, C.w);
-                        drawRect(18 + shakeX, y0 + 6, 2, 2, C.k);
-                    } else if (dinoEmotion === 'thinking') {
-                        // Raised eyebrow & inquisitive eye
-                        drawRect(17 + shakeX, y0 + 3, 4, 1, C.k);
-                        drawRect(17 + shakeX, y0 + 5, 5, 5, C.w);
-                        drawRect(19 + shakeX, y0 + 5, 3, 3, C.k);
-                        drawRect(19 + shakeX, y0 + 5, 1, 1, C.w);
+                    } else if (dinoState === 'speak') {
+                        bounceY = (Math.floor(frameCount / 6) % 2 === 0) ? 0 : 2;
                     } else {
-                        // Default / Idle Eye (with blinking)
-                        if (isBlinking) {
-                            drawRect(17 + shakeX, y0 + 7, 5, 1, C.k);
-                        } else {
-                            drawRect(17 + shakeX, y0 + 5, 5, 5, C.w);
-                            drawRect(19 + shakeX, y0 + 6, 3, 4, C.k);
-                            drawRect(19 + shakeX, y0 + 6, 1, 1, C.w);
+                        // Standard idle breathing
+                        bounceY = (Math.floor(frameCount / 25) % 2 === 0) ? 0 : 1;
+                    }
+
+                    const x0 = 4 + swayX + microShake;
+                    const y0 = 9 - bounceY;
+
+                    // 1. Spikes along back
+                    drawRect(x0 + 9, y0 + 5, 2, 2, C.g3);
+                    drawRect(x0 + 8, y0 + 9, 2, 2, C.g3);
+                    drawRect(x0 + 7, y0 + 13, 2, 2, C.g3);
+
+                    // 2. Head Shape
+                    drawRect(x0 + 11, y0 + 3, 13, 11, C.g1);
+                    drawRect(x0 + 24, y0 + 6, 4, 8, C.g1); // snout
+                    drawRect(x0 + 10, y0 + 4, 1, 9, C.g3);
+                    drawRect(x0 + 11, y0 + 2, 13, 1, C.g3);
+                    drawRect(x0 + 24, y0 + 5, 4, 1, C.g3);
+                    drawRect(x0 + 28, y0 + 6, 1, 7, C.g3);
+                    drawRect(x0 + 11, y0 + 12, 13, 2, C.g2);
+                    drawRect(x0 + 24, y0 + 12, 3, 2, C.g2);
+
+                    // 3. EYES & EXPRESSION
+                    if (activeEmotion === 'sleepy') {
+                        // Peacefully closed curved eyelids
+                        drawRect(x0 + 17, y0 + 7, 5, 1, C.k);
+                        drawRect(x0 + 17, y0 + 8, 1, 1, C.k);
+                        drawRect(x0 + 21, y0 + 8, 1, 1, C.k);
+                    } else if (activeEmotion === 'crying') {
+                        // Tightly shut weeping eyes
+                        drawRect(x0 + 17, y0 + 7, 2, 1, C.k);
+                        drawRect(x0 + 19, y0 + 8, 2, 1, C.k);
+                        drawRect(x0 + 21, y0 + 7, 1, 1, C.k);
+                    } else if (activeEmotion === 'sad') {
+                        // Droopy mournful eyes
+                        drawRect(x0 + 17, y0 + 5, 5, 5, C.w);
+                        drawRect(x0 + 17, y0 + 5, 4, 2, C.g1); // slanted drooping eyelid
+                        drawRect(x0 + 19, y0 + 7, 3, 3, C.k);
+                        drawRect(x0 + 19, y0 + 7, 1, 1, C.w);
+                    } else if (activeEmotion === 'angry') {
+                        // Slanted aggressive brow & glowing orange pupil
+                        drawRect(x0 + 17, y0 + 5, 5, 5, C.w);
+                        drawRect(x0 + 17, y0 + 5, 3, 2, C.g3); // downward angry brow
+                        drawRect(x0 + 20, y0 + 6, 2, 1, C.g3);
+                        drawRect(x0 + 19, y0 + 7, 3, 3, C.o);
+                        drawRect(x0 + 19, y0 + 7, 1, 1, C.w);
+                    } else if (activeEmotion === 'love') {
+                        // Beating Heart Eyes!
+                        drawRect(x0 + 17, y0 + 6, 2, 2, C.o);
+                        drawRect(x0 + 20, y0 + 6, 2, 2, C.o);
+                        drawRect(x0 + 17, y0 + 8, 5, 2, C.o);
+                        drawRect(x0 + 18, y0 + 10, 3, 1, C.o);
+                        drawRect(x0 + 19, y0 + 11, 1, 1, C.o);
+                    } else if (activeEmotion === 'surprised') {
+                        // Huge round wide open eyes
+                        drawRect(x0 + 16, y0 + 4, 6, 6, C.w);
+                        drawRect(x0 + 16, y0 + 4, 6, 1, C.g3);
+                        drawRect(x0 + 18, y0 + 6, 2, 2, C.k);
+                        drawRect(x0 + 18, y0 + 6, 1, 1, C.w);
+                    } else if (activeEmotion === 'dizzy') {
+                        // Crossed spiral eyes
+                        drawRect(x0 + 17, y0 + 5, 1, 1, C.k);
+                        drawRect(x0 + 21, y0 + 5, 1, 1, C.k);
+                        drawRect(x0 + 19, y0 + 7, 1, 1, C.k);
+                        drawRect(x0 + 17, y0 + 9, 1, 1, C.k);
+                        drawRect(x0 + 21, y0 + 9, 1, 1, C.k);
+                    } else if (activeEmotion === 'curious') {
+                        // One raised eyebrow, attentive gaze
+                        drawRect(x0 + 17, y0 + 5, 5, 5, C.w);
+                        drawRect(x0 + 17, y0 + 4, 3, 1, C.g3);
+                        drawRect(x0 + 20, y0 + 6, 2, 1, C.g3);
+                        drawRect(x0 + 18, y0 + 6, 3, 3, C.k);
+                        drawRect(x0 + 18, y0 + 6, 1, 1, C.w);
+                    } else if (isBlinking) {
+                        drawRect(x0 + 17, y0 + 7, 5, 1, C.k);
+                    } else {
+                        // Happy standard catchlight eyes
+                        drawRect(x0 + 17, y0 + 5, 5, 5, C.w);
+                        drawRect(x0 + 19, y0 + 6, 3, 4, C.k);
+                        drawRect(x0 + 19, y0 + 6, 1, 1, C.w);
+                        if (activeEmotion === 'happy' || activeEmotion === 'excited') {
+                            drawRect(x0 + 21, y0 + 8, 1, 1, C.w); // extra sparkle
                         }
                     }
 
-                    // 4. Cheeks Blush
-                    if (dinoEmotion === 'angry') {
-                        drawRect(15 + shakeX, y0 + 10, 3, 2, C.r);
-                    } else if (dinoEmotion !== 'sleepy' && dinoEmotion !== 'sad') {
-                        drawRect(15 + shakeX, y0 + 10, 3, 2, C.p);
-                    }
-
-                    // 5. Mouth
-                    if (dinoEmotion === 'happy' || dinoEmotion === 'excited') {
-                        drawRect(23 + shakeX, y0 + 10, 4, 3, C.g3);
-                        drawRect(24 + shakeX, y0 + 11, 2, 2, C.o);
-                    } else if (dinoEmotion === 'angry') {
-                        drawRect(23 + shakeX, y0 + 10, 5, 2, C.k);
-                        drawRect(24 + shakeX, y0 + 10, 1, 1, C.w);
-                        drawRect(26 + shakeX, y0 + 10, 1, 1, C.w);
-                    } else if (dinoEmotion === 'sad' || dinoEmotion === 'crying') {
-                        drawRect(24 + shakeX, y0 + 11, 3, 1, C.g3);
-                        drawRect(23 + shakeX, y0 + 12, 1, 1, C.g3);
-                    } else if (dinoEmotion === 'shocked') {
-                        drawRect(24 + shakeX, y0 + 10, 3, 3, C.k);
-                        drawRect(25 + shakeX, y0 + 11, 1, 1, C.o);
-                    } else if (mouthOpen) {
-                        drawRect(23 + shakeX, y0 + 10, 4, 3, C.g3);
-                        drawRect(24 + shakeX, y0 + 11, 2, 1, C.o);
+                    // 4. CHEEKS (Blush)
+                    if (activeEmotion === 'love' || activeEmotion === 'happy' || activeEmotion === 'excited') {
+                        drawRect(x0 + 14, y0 + 10, 4, 2, C.p); // bright rosy blush
+                    } else if (activeEmotion === 'angry') {
+                        drawRect(x0 + 15, y0 + 10, 3, 2, C.o); // fiery red blush
+                    } else if (activeEmotion === 'sad' || activeEmotion === 'crying') {
+                        drawRect(x0 + 15, y0 + 10, 3, 2, C.b1); // tearful faint blush
                     } else {
-                        drawRect(24 + shakeX, y0 + 10, 3, 1, C.g3);
+                        drawRect(x0 + 15, y0 + 10, 3, 2, C.p);
                     }
 
-                    // 6. Body & Belly
-                    drawRect(10 + shakeX, y0 + 14, 12, 11, C.g1);
-                    drawRect(9 + shakeX, y0 + 15, 1, 9, C.g3);
-                    drawRect(10 + shakeX, y0 + 23, 12, 2, C.g2);
-                    drawRect(16 + shakeX, y0 + 14, 6, 8, C.y1);
-                    drawRect(17 + shakeX, y0 + 21, 5, 1, C.y2);
-
-                    // 7. Arms
-                    if (dinoEmotion === 'happy' || dinoEmotion === 'excited') {
-                        drawRect(22 + shakeX, y0 + 12, 3, 2, C.g1);
-                        drawRect(24 + shakeX, y0 + 10, 2, 2, C.g1);
-                    } else if (dinoEmotion === 'thinking') {
-                        drawRect(22 + shakeX, y0 + 13, 3, 2, C.g1);
-                        drawRect(24 + shakeX, y0 + 11, 2, 2, C.g1);
+                    // 5. MOUTH
+                    if (activeEmotion === 'sleepy') {
+                        drawRect(x0 + 25, y0 + 10, 2, 1, C.g3); // tiny relaxed sleeping mouth
+                    } else if (activeEmotion === 'crying') {
+                        drawRect(x0 + 24, y0 + 10, 4, 3, C.g3); // weeping mouth
+                        drawRect(x0 + 25, y0 + 11, 2, 2, C.b1);
+                    } else if (activeEmotion === 'sad') {
+                        drawRect(x0 + 24, y0 + 11, 3, 1, C.g3); // downward frown
+                        drawRect(x0 + 24, y0 + 12, 1, 1, C.g3);
+                    } else if (activeEmotion === 'angry') {
+                        drawRect(x0 + 23, y0 + 10, 5, 3, C.g3); // grimace with fangs
+                        drawRect(x0 + 24, y0 + 10, 1, 1, C.w);
+                        drawRect(x0 + 26, y0 + 10, 1, 1, C.w);
+                        drawRect(x0 + 25, y0 + 12, 1, 1, C.w);
+                    } else if (activeEmotion === 'surprised') {
+                        drawRect(x0 + 24, y0 + 9, 3, 4, C.g3); // "O" mouth gasp
+                        drawRect(x0 + 25, y0 + 10, 1, 2, C.k);
+                    } else if (activeEmotion === 'dizzy') {
+                        drawRect(x0 + 24, y0 + 10, 1, 1, C.g3);
+                        drawRect(x0 + 25, y0 + 11, 2, 1, C.g3);
+                        drawRect(x0 + 27, y0 + 10, 1, 1, C.g3);
+                    } else if ((dinoState === 'speak' && mouthOpen) || activeEmotion === 'happy' || activeEmotion === 'excited' || activeEmotion === 'love') {
+                        drawRect(x0 + 23, y0 + 10, 4, 3, C.g3);
+                        drawRect(x0 + 24, y0 + 11, 2, 1, C.o); // tongue
                     } else {
-                        drawRect(21 + shakeX, y0 + 16, 3, 2, C.g1);
+                        drawRect(x0 + 24, y0 + 10, 3, 1, C.g3);
                     }
 
-                    // 8. Tail Wagging
-                    const tailFast = (dinoEmotion === 'happy' || dinoEmotion === 'excited');
-                    const tailDiv = tailFast ? 6 : 14;
-                    const tailWag = (Math.floor(frameCount / tailDiv) % 2 === 0);
-                    if (dinoEmotion === 'sad') {
-                        drawRect(6 + shakeX, y0 + 20, 4, 3, C.g1);
-                        drawRect(3 + shakeX, y0 + 22, 3, 2, C.g1);
-                        drawRect(1 + shakeX, y0 + 23, 2, 2, C.g1);
+                    // 6. BODY & BELLY
+                    drawRect(x0 + 10, y0 + 14, 12, 11, C.g1);
+                    drawRect(x0 + 9, y0 + 15, 1, 9, C.g3);
+                    drawRect(x0 + 10, y0 + 23, 12, 2, C.g2);
+                    drawRect(x0 + 16, y0 + 14, 6, 8, C.y1);
+                    drawRect(x0 + 17, y0 + 21, 5, 1, C.y2);
+
+                    // 7. ARMS
+                    if (activeEmotion === 'excited' || activeEmotion === 'happy') {
+                        drawRect(x0 + 22, y0 + 12, 3, 2, C.g1); // Cheering arms
+                    } else if (activeEmotion === 'love') {
+                        drawRect(x0 + 21, y0 + 15, 3, 2, C.g1); // Clasping paws
+                    } else if (activeEmotion === 'crying') {
+                        drawRect(x0 + 19, y0 + 11, 3, 3, C.g1); // Wiping tears
+                    } else if (activeEmotion === 'sad') {
+                        drawRect(x0 + 21, y0 + 18, 2, 3, C.g1); // Drooped arms
+                    } else if (activeEmotion === 'angry') {
+                        drawRect(x0 + 22, y0 + 15, 3, 2, C.g1); // Clenched fists
+                    } else {
+                        drawRect(x0 + 21, y0 + 16, 3, 2, C.g1);
+                    }
+
+                    // 8. TAIL WAG
+                    const wagSpeed = (activeEmotion === 'excited' || activeEmotion === 'happy' || activeEmotion === 'love') ? 6 : 14;
+                    const tailWag = (Math.floor(frameCount / wagSpeed) % 2 === 0);
+                    if (activeEmotion === 'sad') {
+                        drawRect(x0 + 6, y0 + 20, 4, 3, C.g1);
+                        drawRect(x0 + 3, y0 + 22, 3, 2, C.g1);
+                        drawRect(x0 + 1, y0 + 23, 2, 2, C.g1);
                     } else if (tailWag) {
-                        drawRect(6 + shakeX, y0 + 18, 4, 4, C.g1);
-                        drawRect(3 + shakeX, y0 + 19, 3, 3, C.g1);
-                        drawRect(2 + shakeX, y0 + 20, 2, 2, C.g1);
+                        drawRect(x0 + 6, y0 + 18, 4, 4, C.g1);
+                        drawRect(x0 + 3, y0 + 19, 3, 3, C.g1);
+                        drawRect(x0 + 2, y0 + 20, 2, 2, C.g1);
                     } else {
-                        drawRect(6 + shakeX, y0 + 19, 4, 4, C.g1);
-                        drawRect(3 + shakeX, y0 + 21, 3, 3, C.g1);
-                        drawRect(1 + shakeX, y0 + 23, 2, 2, C.g1);
+                        drawRect(x0 + 6, y0 + 19, 4, 4, C.g1);
+                        drawRect(x0 + 3, y0 + 21, 3, 3, C.g1);
+                        drawRect(x0 + 1, y0 + 23, 2, 2, C.g1);
                     }
 
-                    // 9. Feet
-                    if (dinoEmotion === 'angry') {
-                        const stomp = (Math.floor(frameCount / 8) % 2 === 0);
-                        drawRect(12 + shakeX, y0 + 25 - (stomp ? 1 : 0), 3, 3, C.g3);
-                        drawRect(17 + shakeX, y0 + 25 - (stomp ? 0 : 1), 3, 3, C.g3);
-                    } else {
-                        drawRect(12 + shakeX, y0 + 25, 3, 3, C.g3);
-                        drawRect(17 + shakeX, y0 + 25, 3, 3, C.g3);
+                    // 9. FEET
+                    drawRect(x0 + 12, y0 + 25, 3, 3, C.g3);
+                    drawRect(x0 + 17, y0 + 25, 3, 3, C.g3);
+
+                    // 10. EMOTIONAL OVERLAYS & PARTICLES
+                    if (activeEmotion === 'crying') {
+                        const tearCycle = (frameCount % 18);
+                        const ty1 = y0 + 8 + Math.floor(tearCycle / 2);
+                        drawRect(x0 + 17, ty1, 2, 3, C.b1);
+                        drawRect(x0 + 17, ty1 + 1, 1, 1, C.w);
+                        if (tearCycle > 10) {
+                            drawRect(x0 + 15, y0 + 23, 2, 2, C.b2);
+                            drawRect(x0 + 22, y0 + 24, 2, 2, C.b2);
+                        }
                     }
 
-                    updateAndDrawParticles();
-                    ctx.restore();
+                    if (activeEmotion === 'sleepy') {
+                        for (let i = 0; i < 3; i++) {
+                            const zProg = ((frameCount + i * 28) % 84) / 84;
+                            const zx = x0 + 24 + i * 3 + Math.sin(zProg * 5) * 2;
+                            const zy = y0 + 2 - zProg * 14;
+                            const sz = (i === 2) ? 4 : (i === 1 ? 3 : 2);
+                            if (zy >= 0 && zy < 34) {
+                                drawPixelZ(Math.round(zx), Math.round(zy), sz, C.w);
+                            }
+                        }
+                    }
+
+                    if (activeEmotion === 'angry') {
+                        const puffProg = (frameCount % 24) / 24;
+                        const puffY = y0 - 1 - puffProg * 6;
+                        if (puffY >= 0) {
+                            drawRect(x0 + 12, Math.round(puffY), 2, 2, C.w);
+                            drawRect(x0 + 14, Math.round(puffY) - 1, 3, 2, C.w);
+                            drawRect(x0 + 22, Math.round(puffY) + 1, 2, 2, C.w);
+                        }
+                    }
+
+                    if (activeEmotion === 'love') {
+                        for (let i = 0; i < 2; i++) {
+                            const hProg = ((frameCount + i * 35) % 70) / 70;
+                            const hx = x0 + 20 + Math.sin(hProg * 4 + i) * 3;
+                            const hy = y0 + 2 - hProg * 12;
+                            if (hy >= 0 && hy < 34) {
+                                drawPixelHeart(Math.round(hx), Math.round(hy), (i === 0 ? C.o : C.p));
+                            }
+                        }
+                    }
+
+                    if (activeEmotion === 'surprised') {
+                        drawRect(x0 + 26, y0 - 4, 2, 4, C.y1);
+                        drawRect(x0 + 26, y0 + 1, 2, 1, C.y1);
+                    }
+
+                    if (activeEmotion === 'curious') {
+                        drawRect(x0 + 25, y0 - 5, 3, 1, C.v);
+                        drawRect(x0 + 27, y0 - 4, 1, 2, C.v);
+                        drawRect(x0 + 26, y0 - 2, 2, 1, C.v);
+                        drawRect(x0 + 26, y0, 1, 1, C.v);
+                    }
+
+                    if (activeEmotion === 'dizzy') {
+                        const angle1 = (frameCount * 0.12);
+                        const angle2 = angle1 + Math.PI;
+                        const ox1 = x0 + 18 + Math.cos(angle1) * 9;
+                        const oy1 = y0 - 1 + Math.sin(angle1) * 3;
+                        const ox2 = x0 + 18 + Math.cos(angle2) * 9;
+                        const oy2 = y0 - 1 + Math.sin(angle2) * 3;
+                        drawRect(Math.round(ox1), Math.round(oy1), 2, 2, C.y1);
+                        drawRect(Math.round(ox2), Math.round(oy2), 2, 2, C.y1);
+                    }
+
+                    if (activeEmotion === 'excited') {
+                        if (frameCount % 6 < 3) {
+                            drawRect(x0 + 27, y0 - 2, 2, 2, C.y1);
+                            drawRect(x0 + 5, y0 + 4, 2, 2, C.w);
+                        } else {
+                            drawRect(x0 + 25, y0 + 1, 2, 2, C.w);
+                            drawRect(x0 + 7, y0 + 1, 2, 2, C.y1);
+                        }
+                    }
                 }
 
                 function animLoop() {
                     frameCount++;
                     if (frameCount % 180 === 0) isBlinking = true;
                     if (frameCount % 180 === 12) isBlinking = false;
-                    if (dinoEmotion === 'thinking') mouthOpen = (frameCount % 16 < 8);
+                    if (dinoState === 'speak') mouthOpen = (frameCount % 10 < 5);
 
-                    // Idle sleep timer check (every ~1s)
-                    if (frameCount % 60 === 0) {
-                        idleTimerSeconds++;
-                        if (idleTimerSeconds >= 25 && dinoEmotion === 'idle') {
-                            dinoEmotion = 'sleepy';
-                            updateMoodTag('sleepy');
-                        }
+                    // Expire temporary emotion locks back to defaultEmotion
+                    if (emotionLockUntil > 0 && Date.now() > emotionLockUntil) {
+                        emotionLockUntil = 0;
+                        currentEmotion = defaultEmotion;
                     }
 
-                    // Autonomous Cursor smooth interpolation when in follow mode
+                    // Inactivity detection: 30s of mouse stillness puts Rex to sleep
+                    const idleMs = Date.now() - lastMouseMoveTime;
+                    if (idleMs > 30000 && !isSleeping && curMode === 'follow' && !isAutonomousMoving) {
+                        isSleeping = true;
+                        currentEmotion = 'sleepy';
+                    }
+
+                    // Fluid physics interpolation loop (60Hz / 120Hz ProMotion display sync)
                     if (curMode === 'follow' && !isAutonomousMoving) {
                         const dx = targetX - curX;
                         const dy = targetY - curY;
@@ -1407,7 +1308,27 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                             const lerpFactor = dist > 80 ? 0.38 : 0.28;
                             curX += dx * lerpFactor;
                             curY += dy * lerpFactor;
+
+                            if (dist > 3) {
+                                dinoState = 'walk';
+                            } else {
+                                if (dinoState === 'walk') dinoState = 'idle';
+                            }
+
+                            // Rapid frantic cursor shaking detection
+                            if (dist > 38) {
+                                consecutiveFastFrames++;
+                                if (consecutiveFastFrames > 28) {
+                                    window.setRexEmotion('dizzy', 2800);
+                                    consecutiveFastFrames = 0;
+                                }
+                            } else {
+                                consecutiveFastFrames = Math.max(0, consecutiveFastFrames - 1);
+                            }
+
                             container.style.transform = `translate3d(${curX.toFixed(2)}px, ${curY.toFixed(2)}px, 0)`;
+                        } else {
+                            if (dinoState === 'walk') dinoState = 'idle';
                         }
                     }
 
@@ -1416,57 +1337,73 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                 }
                 requestAnimationFrame(animLoop);
 
-                // =========================================
-                // WINDOW GLOBAL APIS CALLED FROM SWIFT
-                // =========================================
-                window.setRexEmotion = (emotion) => {
-                    const clean = String(emotion || 'idle').toLowerCase().trim();
-                    dinoEmotion = clean;
-                    updateMoodTag(clean);
-                    idleTimerSeconds = 0;
-                };
-
-                window.onUserMouseActivity = () => {
-                    idleTimerSeconds = 0;
-                    if (dinoEmotion === 'sleepy') {
-                        dinoEmotion = 'idle';
-                        updateMoodTag('idle');
-                    }
-                };
-
-                window.setMascotHover = (hovered) => {
-                    if (hovered) {
-                        mascotPedestal.classList.add('hovered');
-                        if (dinoEmotion === 'idle' || dinoEmotion === 'sleepy') {
-                            dinoEmotion = 'happy';
-                            updateMoodTag('happy');
-                        }
-                    } else {
-                        mascotPedestal.classList.remove('hovered');
-                        if (dinoEmotion === 'happy' && idleTimerSeconds > 2) {
-                            dinoEmotion = 'idle';
-                            updateMoodTag('idle');
-                        }
-                    }
-                };
-
+                // Window Global API called from Swift & Interactions
                 window.updateMousePosition = (x, y) => {
                     if (curMode !== 'follow') return;
+                    const now = Date.now();
+
+                    // If Rex was sleeping, wake him up startled!
+                    if (isSleeping) {
+                        isSleeping = false;
+                        window.setRexEmotion('surprised', 1500);
+                        window.showRexSpeech('Yawn! Rex is awake!', 2000, 'WAKE');
+                    }
+
+                    lastMouseMoveTime = now;
                     targetX = x;
                     targetY = y;
+                };
+
+                window.setRexEmotion = (emotion, durationMs = 0) => {
+                    currentEmotion = emotion;
+                    if (durationMs > 0) {
+                        emotionLockUntil = Date.now() + durationMs;
+                    } else {
+                        defaultEmotion = emotion;
+                        emotionLockUntil = 0;
+                    }
+                };
+
+                window.onUserPhysicalClick = (clickX, clickY, isRight = false) => {
+                    const now = Date.now();
+                    clickHistory.push(now);
+                    clickHistory = clickHistory.filter(t => now - t < 1400);
+
+                    // 1. Petting Rex (click within 46px of Rex's mascot)
+                    const rexCenterX = curX + 26;
+                    const rexCenterY = curY + 26;
+                    const distToRex = Math.hypot(clickX - rexCenterX, clickY - rexCenterY);
+
+                    if (distToRex < 46) {
+                        window.setRexEmotion('love', 3500);
+                        window.showRexSpeech('❤️ Rex loves pats!', 2500, 'PET');
+                        return;
+                    }
+
+                    // 2. Click spam / rage clicking (5+ clicks in 1.4s)
+                    if (clickHistory.length >= 5) {
+                        window.setRexEmotion('dizzy', 2500);
+                        return;
+                    }
+
+                    // 3. Right-click
+                    if (isRight) {
+                        window.setRexEmotion('curious', 1800);
+                        return;
+                    }
+
+                    // 4. Normal click -> perk up happily
+                    if (Date.now() > emotionLockUntil) {
+                        window.setRexEmotion('happy', 1200);
+                    }
                 };
 
                 window.moveToTarget = (x, y, duration = 300, style = 'default') => {
                     curStyle = style;
                     cursorIcon.innerHTML = SVGS[style] || SVGS.default;
+                    dinoState = 'walk';
                     isAutonomousMoving = true;
                     curMode = 'autonomous';
-                    idleTimerSeconds = 0;
-
-                    if (dinoEmotion === 'idle' || dinoEmotion === 'sleepy') {
-                        dinoEmotion = 'excited';
-                        updateMoodTag('excited');
-                    }
 
                     container.style.transition = `transform ${duration}ms cubic-bezier(0.16, 1, 0.3, 1)`;
                     curX = x;
@@ -1478,6 +1415,7 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                     setTimeout(() => {
                         container.style.transition = 'none';
                         isAutonomousMoving = false;
+                        dinoState = 'idle';
                     }, duration);
                 };
 
@@ -1486,13 +1424,15 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                     if (mode === 'follow') {
                         container.style.transition = 'none';
                         isAutonomousMoving = false;
+                    } else {
+                        dinoState = 'idle';
                     }
                 };
 
                 window.setRexAppearance = (app) => {
                     curAppearance = app;
-                    container.style.display = (app === 'dino') ? 'none' : 'block';
-                    document.getElementById('rex-dock').style.display = (app === 'cursor') ? 'none' : 'flex';
+                    cursorIcon.style.display = (app === 'dino') ? 'none' : 'block';
+                    dinoWrap.style.display = (app === 'cursor') ? 'none' : 'flex';
                 };
 
                 window.setRexStyle = (style) => {
@@ -1503,12 +1443,7 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                 window.triggerClickPulse = (x, y, style = 'handpointing') => {
                     cursorIcon.innerHTML = SVGS[style] || SVGS.handpointing;
                     cursorIcon.classList.add('clicking');
-                    cursorBadge.classList.add('clicking');
-
-                    if (dinoEmotion === 'idle' || dinoEmotion === 'excited') {
-                        dinoEmotion = 'happy';
-                        updateMoodTag('happy');
-                    }
+                    window.setRexEmotion('happy', 800);
 
                     const ripple = document.createElement('div');
                     ripple.className = 'click-ripple';
@@ -1518,7 +1453,6 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
 
                     setTimeout(() => {
                         cursorIcon.classList.remove('clicking');
-                        cursorBadge.classList.remove('clicking');
                         cursorIcon.innerHTML = SVGS[curStyle] || SVGS.default;
                         ripple.remove();
                     }, 500);
@@ -1531,24 +1465,25 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                     if (textEl) textEl.textContent = text;
                     if (badgeEl) badgeEl.textContent = badge;
                     speechBubble.classList.add('active');
+                    dinoState = 'speak';
 
-                    if (badge === 'ERROR' || badge === 'CAUTION') {
-                        dinoEmotion = (badge === 'ERROR') ? 'crying' : 'shocked';
-                    } else if (badge === 'PAUSED') {
-                        dinoEmotion = 'sad';
-                    } else if (badge === 'READY' || badge === 'SUCCESS') {
-                        dinoEmotion = 'happy';
-                    } else {
-                        dinoEmotion = 'happy';
+                    // Contextual emotion adaptation based on speech intent
+                    const lower = (text + ' ' + badge).toLowerCase();
+                    if (lower.includes('paused') || lower.includes('brake') || lower.includes('error')) {
+                        window.setRexEmotion('sad', duration);
+                    } else if (lower.includes('caution') || lower.includes('risk') || lower.includes('danger')) {
+                        window.setRexEmotion('angry', duration);
+                    } else if (lower.includes('crying') || lower.includes('failed') || lower.includes('sorry')) {
+                        window.setRexEmotion('crying', duration);
+                    } else if (lower.includes('ready') || lower.includes('success') || lower.includes('resumed') || lower.includes('done')) {
+                        window.setRexEmotion('excited', duration);
+                    } else if (lower.includes('scanning') || lower.includes('planning') || lower.includes('analyzing') || lower.includes('curious')) {
+                        window.setRexEmotion('curious', duration);
                     }
-                    updateMoodTag(dinoEmotion);
 
                     speechTimer = setTimeout(() => {
                         speechBubble.classList.remove('active');
-                        if (dinoEmotion === 'happy' || dinoEmotion === 'shocked') {
-                            dinoEmotion = 'idle';
-                            updateMoodTag('idle');
-                        }
+                        if (dinoState === 'speak') dinoState = 'idle';
                     }, duration);
                 };
 
@@ -1571,12 +1506,14 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                     if (active) {
                         eq?.classList.add('active');
                         mic?.classList.add('active');
-                        window.setRexEmotion('thinking');
+                        dinoState = 'listen';
+                        window.setRexEmotion('curious', 0);
                         window.setRexStyle('beachball');
                     } else {
                         eq?.classList.remove('active');
                         mic?.classList.remove('active');
-                        window.setRexEmotion('idle');
+                        if (dinoState === 'listen') dinoState = 'idle';
+                        window.setRexEmotion('happy', 0);
                     }
                 };
 
@@ -1586,11 +1523,13 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                     eq?.classList.remove('active');
                     mic?.classList.remove('active');
                     if (active) {
-                        window.setRexEmotion('thinking');
+                        dinoState = 'think';
+                        window.setRexEmotion('curious', 0);
                         window.setRexStyle('busy');
                     } else {
-                        window.setRexEmotion('idle');
+                        if (dinoState === 'think') dinoState = 'idle';
                         window.setRexStyle('default');
+                        window.setRexEmotion('happy', 0);
                     }
                 };
             </script>

@@ -626,6 +626,12 @@ async function main() {
                 if (!isScreenCursorRunning()) await startScreenCursor({ silent: true });
                 cursorSpeak(text);
                 p.log.success(`Rex spoke on screen: "${text}"`);
+            } else if (act === 'emotion' || act === 'mood') {
+                const emotion = process.argv[4] || 'happy';
+                const { setCursorEmotion } = await import('./screenCursor.js');
+                if (!isScreenCursorRunning()) await startScreenCursor({ silent: true });
+                setCursorEmotion(emotion);
+                p.log.success(`Rex cursor emotion set to: ${pc.cyan(emotion)}`);
             } else {
                 await cursorMenu();
             }

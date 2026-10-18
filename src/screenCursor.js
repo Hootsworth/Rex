@@ -23,10 +23,64 @@ let overlayRl = null;
 let currentMode = 'follow';
 let currentAppearance = 'both';
 let currentStyle = 'default';
+let currentEmotion = 'happy';
 let screenDimensions = { width: 1470, height: 956 };
 let readyPromiseResolver = null;
 let isStarting = false;
 let onBargeInCallback = null;
+let moodSyncTimer = null;
+
+export const SUPPORTED_EMOTIONS = [
+    'happy',
+    'sad',
+    'angry',
+    'crying',
+    'sleepy',
+    'love',
+    'surprised',
+    'excited',
+    'dizzy',
+    'curious'
+];
+
+function startMoodSync() {
+    if (moodSyncTimer) return;
+    let lastMood = null;
+    moodSyncTimer = setInterval(async () => {
+        if (!isScreenCursorRunning()) {
+            stopMoodSync();
+            return;
+        }
+        try {
+            const { getCurrentMood } = await import('./moodEngine.js');
+            const mood = getCurrentMood();
+            if (mood?.state && mood.state !== lastMood) {
+                lastMood = mood.state;
+                const map = {
+                    excited: 'excited',
+                    happy: 'happy',
+                    neutral: 'happy',
+                    focused: 'curious',
+                    sarcastic: 'curious',
+                    tired: 'sleepy',
+                    grumpy: 'angry',
+                    proud: 'excited',
+                    worried: 'sad',
+                    caffeinated: 'excited'
+                };
+                const emotion = map[mood.state] || 'happy';
+                setCursorEmotion(emotion, 0);
+            }
+        } catch {}
+    }, 3500);
+}
+
+function stopMoodSync() {
+    if (moodSyncTimer) {
+        clearInterval(moodSyncTimer);
+        moodSyncTimer = null;
+    }
+}
 
 /**
  * Ensure native swift binaries are compiled.
@@ -245,6 +299,8 @@ export async function startScreenCursor(options = {}) {
         setCursorMode(currentMode);
         setCursorAppearance(currentAppearance);
         setCursorStyle(currentStyle);
+        if (options.emotion) setCursorEmotion(options.emotion);
+        startMoodSync();
 
         if (!options.silent) {
             console.log(pc.green(`\n🦖 Rex macOS Persistent Screen Cursor is active across all screens! (Mode: ${currentMode}, Appearance: ${currentAppearance})\n`));
@@ -314,6 +370,7 @@ async function startGlobalHotkeyListener() {
  * Stop and terminate the Rex Screen Cursor overlay.
  */
 export function stopScreenCursor() {
+    stopMoodSync();
     if (uiohookActive) {
         try {
             import('uiohook-napi').then(({ uIOhook }) => {
@@ -363,6 +420,26 @@ export function setBargeInEnabled(enabled = true) {
 }
 
 /**
+ * Set Rex's emotional expression on the screen cursor.
+ * @param {'happy'|'sad'|'angry'|'crying'|'sleepy'|'love'|'surprised'|'excited'|'dizzy'|'curious'} emotion
+ * @param {number} [duration=0] Duration in ms (0 = persistent until next state change)
+ */
+export function setCursorEmotion(emotion, duration = 0) {
+    const valid = SUPPORTED_EMOTIONS.includes(emotion) ? emotion : 'happy';
+    currentEmotion = valid;
+    return sendCommand({ cmd: 'setEmotion', emotion: valid, duration });
+}
+
+export const setRexEmotion = setCursorEmotion;
+
+/**
+ * Get current configured Rex cursor emotion.
+ */
+export function getCursorEmotion() {
+    return currentEmotion;
+}
+
+/**
  * Set Rex listening visual state (equalizer + mic indicator).
  */
 export function setCursorListening(listening = true) {
@@ -374,14 +451,6 @@ export function setCursorListening(listening = true) {
  */
 export function setCursorThinking(thinking = true) {
     return sendCommand({ cmd: 'setThinking', thinking });
-}
-
-/**
- * Set Rex Mascot Emotion ('idle', 'happy', 'sad', 'angry', 'crying', 'sleepy', 'thinking', 'excited', 'shocked').
- * @param {'idle'|'happy'|'sad'|'angry'|'crying'|'sleepy'|'thinking'|'excited'|'shocked'} emotion
- */
-export function setRexEmotion(emotion = 'idle') {
-    return sendCommand({ cmd: 'setEmotion', emotion });
 }
 
 /**
@@ -609,6 +678,7 @@ export async function cursorMenu() {
             { value: 'demo', label: '✨ Run Interactive Demo Tour' },
             { value: 'mode', label: '🔄 Switch Mode (Follow / Autonomous / Idle)' },
             { value: 'appearance', label: '🎨 Switch Appearance (Dino / Cursor / Both)' },
+            { value: 'emotion', label: '🎭 Rex Emotion (Happy, Sad, Angry, Crying, Sleepy, Love, etc.)' },
             { value: 'speak', label: '💬 Make Rex Speak on Screen' },
             { value: 'permissions', label: '🔐 Verify & Request macOS Permissions' },
             ...(isRunning ? [{ value: 'stop', label: '🛑 Stop Screen Cursor' }] : []),
@@ -666,6 +736,28 @@ export async function cursorMenu() {
         if (!p.isCancel(appChoice)) {
             setCursorAppearance(appChoice);
             p.log.success(`Appearance set to "${appChoice}".`);
+        }
+        await cursorMenu();
+    } else if (action === 'emotion') {
+        if (!isScreenCursorRunning()) await startScreenCursor({ silent: true });
+        const emotionChoice = await p.select({
+            message: "Choose Rex's expression / emotion:",
+            options: [
+                { value: 'happy', label: '😊 Happy (Bouncy, rosy cheeks, tail wagging)' },
+                { value: 'sad', label: '😢 Sad (Droopy eyes, downcast frown, slumped)' },
+                { value: 'angry', label: '😡 Angry (Slanted brow, steam puffs, clenched fangs)' },
+                { value: 'crying', label: '😭 Crying (Cascading streaming tears & splashes)' },
+                { value: 'sleepy', label: '😴 Sleepy (Closed eyes, floating animated Zzz)' },
+                { value: 'love', label: '❤️ In Love / Petting (Heart eyes & floating hearts)' },
+                { value: 'excited', label: '🤩 Excited (Confetti sparkles, cheering arms)' },
+                { value: 'dizzy', label: '😵 Dizzy (Spiral eyes, orbiting stars, wobbly sway)' },
+                { value: 'surprised', label: '😲 Surprised (Wide round eyes, exclamation hop)' },
+                { value: 'curious', label: '🧐 Curious (Cocked head, raised brow, ? mark)' }
+            ]
+        });
+        if (!p.isCancel(emotionChoice)) {
+            setCursorEmotion(emotionChoice, 0);
+            p.log.success(`Rex emotion set to "${emotionChoice}".`);
         }
         await cursorMenu();
     } else if (action === 'speak') {

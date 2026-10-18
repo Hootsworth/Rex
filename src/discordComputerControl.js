@@ -190,7 +190,7 @@ export async function handleComputerPermissionInteraction(interaction) {
     pendingPermissions.delete(matchedUserId);
 
     if (action === 'deny') {
-        setRexEmotion('sad');
+        setRexEmotion('sad', 4000);
         const deniedEmbed = new EmbedBuilder()
             .setColor(0xED4245)
             .setTitle('❌ Screen Takeover Cancelled')
@@ -205,7 +205,7 @@ export async function handleComputerPermissionInteraction(interaction) {
     }
 
     if (action === 'approve') {
-        setRexEmotion('excited');
+        setRexEmotion('excited', 5000);
         const approvedEmbed = new EmbedBuilder()
             .setColor(0x57F287)
             .setTitle('🦖 Authorization Granted!')
@@ -392,5 +392,6 @@ export async function executeDiscordComputerTask({ channel, task, userId }) {
     } catch {}
 
     playAudioCue('success');
+    setRexEmotion('excited', 5000);
     console.log(pc.green(`[Discord Screen Control]: Autonomous takeover finished successfully.`));
 }
