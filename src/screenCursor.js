@@ -377,6 +377,14 @@ export function setCursorThinking(thinking = true) {
 }
 
 /**
+ * Set Rex Mascot Emotion ('idle', 'happy', 'sad', 'angry', 'crying', 'sleepy', 'thinking', 'excited', 'shocked').
+ * @param {'idle'|'happy'|'sad'|'angry'|'crying'|'sleepy'|'thinking'|'excited'|'shocked'} emotion
+ */
+export function setRexEmotion(emotion = 'idle') {
+    return sendCommand({ cmd: 'setEmotion', emotion });
+}
+
+/**
  * Trigger voice recording & autonomous screen reasoning.
  */
 export async function triggerVoiceCommand(opts) {

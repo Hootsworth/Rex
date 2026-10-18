@@ -25,6 +25,7 @@ import {
     setCursorMode,
     setCursorStyle,
     setBargeInEnabled,
+    setRexEmotion,
     moveCursorTo,
     cursorClick,
     cursorDoubleClick,
@@ -803,6 +804,7 @@ export async function executeActionPlan(plan, screenWidth = 1470, screenHeight =
     try {
         for (const step of plan.steps) {
             if (userInterrupted) {
+                setRexEmotion('sad');
                 cursorSpeak("Emergency Brake: Autonomous sequence paused. Controls yielded to you.", 4000, "PAUSED");
                 break;
             }
@@ -850,10 +852,13 @@ export async function executeActionPlan(plan, screenWidth = 1470, screenHeight =
         // 2. Action Risk Classification & Safety Guardrails
         const risk = classifyActionRisk(step.label || '', step.speech || '');
         if (risk.level === 'HIGH_RISK') {
+            setRexEmotion('shocked');
             cursorHighlight(boxX, boxY, w, h, `HIGH RISK: ${step.label}`);
             cursorSpeak(`Caution: High-risk operation detected (${risk.reason}). Verifying safety...`, 4000, "CAUTION");
             playAudioCue('warn');
             await sleep(1800);
+        } else {
+            setRexEmotion('excited');
         }
 
         // 3. Visibly move Rex cursor to target
@@ -952,6 +957,7 @@ export async function executeActionPlan(plan, screenWidth = 1470, screenHeight =
 
     // Finish tour and hold autonomous position (do NOT snap to user cursor!)
     hideCursorHighlight();
+    setRexEmotion('happy');
     cursorSpeak(`All autonomous steps executed successfully. Rex is holding position.`, 4000, "READY");
     playAudioCue('success');
     await sleep(1500);
@@ -991,6 +997,7 @@ export async function triggerVoiceCommand(options = {}) {
 
         // 1. Enter Listening Mode
         playAudioCue('listening');
+        setRexEmotion('thinking');
         cursorSpeak("Listening... Speak a command (e.g., 'teach me color grading in DaVinci')", 4000, "LISTENING");
         setCursorStyle('beachball');
 
@@ -1001,6 +1008,7 @@ export async function triggerVoiceCommand(options = {}) {
         const recorded = await recordMicAudio(4, audioPath);
 
         if (!recorded) {
+            setRexEmotion('sad');
             cursorSpeak("Could not capture audio from microphone. Please ensure microphone access is granted.", 3500, "ERROR");
             isAgentBusy = false;
             return;
@@ -1008,6 +1016,7 @@ export async function triggerVoiceCommand(options = {}) {
 
         // 2. Enter Thinking Mode
         playAudioCue('thinking');
+        setRexEmotion('thinking');
         cursorSpeak("Analyzing your screen and planning actions...", 4500, "THINKING");
         setCursorStyle('busy');
 
@@ -1016,6 +1025,7 @@ export async function triggerVoiceCommand(options = {}) {
         try { fs.unlinkSync(audioPath); } catch {}
 
         if (!userPrompt) {
+            setRexEmotion('sad');
             cursorSpeak("Speech unrecognized. Please try speaking again.", 3500, "READY");
             isAgentBusy = false;
             return;
@@ -1027,6 +1037,7 @@ export async function triggerVoiceCommand(options = {}) {
         // 4. Capture screenshot of current screen
         const screenshotPath = await captureScreen();
         if (!screenshotPath || !fs.existsSync(screenshotPath)) {
+            setRexEmotion('crying');
             cursorSpeak("Could not capture screen. Please check Screen Recording permissions.", 3500, "ERROR");
             isAgentBusy = false;
             return;
