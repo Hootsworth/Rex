@@ -24,6 +24,7 @@ import {
     startScreenCursor,
     setCursorMode,
     setCursorStyle,
+    setBargeInEnabled,
     moveCursorTo,
     cursorClick,
     cursorDoubleClick,
@@ -796,11 +797,15 @@ export async function executeActionPlan(plan, screenWidth = 1470, screenHeight =
         userInterrupted = true;
     });
 
-    for (const step of plan.steps) {
-        if (userInterrupted) {
-            cursorSpeak("Emergency Brake: Autonomous sequence paused. Controls yielded to you.", 4000, "PAUSED");
-            break;
-        }
+    // Enable barge-in strictly for physical action execution!
+    setBargeInEnabled(true);
+
+    try {
+        for (const step of plan.steps) {
+            if (userInterrupted) {
+                cursorSpeak("Emergency Brake: Autonomous sequence paused. Controls yielded to you.", 4000, "PAUSED");
+                break;
+            }
 
         const hasExplicitX = step.x !== undefined && step.x !== null;
         const hasExplicitY = step.y !== undefined && step.y !== null;
@@ -941,6 +946,9 @@ export async function executeActionPlan(plan, screenWidth = 1470, screenHeight =
         // Wait for user to observe and UI to respond
         await sleep(2400);
     }
+    } finally {
+        setBargeInEnabled(false);
+    }
 
     // Finish tour and hold autonomous position (do NOT snap to user cursor!)
     hideCursorHighlight();
@@ -975,6 +983,7 @@ export async function triggerVoiceCommand(options = {}) {
         } else {
             setCursorMode('autonomous');
         }
+        setBargeInEnabled(false);
 
         const cacheDir = path.join(process.cwd(), '.rex', 'cache');
         if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });

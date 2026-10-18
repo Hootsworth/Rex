@@ -20,7 +20,10 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     var targetY: CGFloat = 100
     var lastMousePos: NSPoint = .zero
     var lastUserMousePos: NSPoint = .zero
-    var autonomousBargeInEnabled: Bool = true
+    var autonomousBargeInEnabled: Bool = false
+    var isExecutingAutonomousAction: Bool = false
+    var lastAutonomousActionTime: TimeInterval = 0
+    var accumulatedUserDelta: Double = 0.0
     var isReady: Bool = false
     var timer: Timer?
 
@@ -116,11 +119,28 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
 
         // Emergency Brake / Take the Wheel detection in autonomous mode
         if mode == "autonomous" && autonomousBargeInEnabled {
+            let now = Date().timeIntervalSince1970
+            // If Rex is currently executing an autonomous action or just completed one, ignore cursor repositioning!
+            if isExecutingAutonomousAction || (now - lastAutonomousActionTime < 1.2) {
+                lastUserMousePos = rawPos
+                accumulatedUserDelta = 0
+                return
+            }
+
             if lastUserMousePos != .zero {
                 let dx = rawPos.x - lastUserMousePos.x
                 let dy = rawPos.y - lastUserMousePos.y
                 let dist = sqrt(dx * dx + dy * dy)
-                if dist > 45 {
+                // Filter out sub-pixel jitter
+                if dist > 3.0 {
+                    accumulatedUserDelta += dist
+                } else {
+                    accumulatedUserDelta = max(0, accumulatedUserDelta - 2.0)
+                }
+
+                // If user deliberately moves the mouse (cumulative displacement > 80 points)
+                if accumulatedUserDelta > 80 {
+                    accumulatedUserDelta = 0
                     self.mode = "paused"
                     self.callJS("window.showRexSpeech('Control yielded to user. Tap Control+Shift+Space to resume!', 4000, 'PAUSED')")
                     print("{\"event\":\"bargeIn\",\"reason\":\"mouseMoved\",\"x\":\(rawPos.x),\"y\":\(self.screenFrame.height - rawPos.y)}")
@@ -132,6 +152,7 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         }
 
         lastUserMousePos = rawPos
+        accumulatedUserDelta = 0
 
         guard mode == "follow" else { return }
 
@@ -185,6 +206,10 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         guard let source = CGEventSource(stateID: .hidSystemState) else { return }
         let pt = CGPoint(x: x, y: y)
 
+        self.isExecutingAutonomousAction = true
+        self.lastAutonomousActionTime = Date().timeIntervalSince1970
+        self.lastUserMousePos = NSPoint(x: x, y: self.screenFrame.height - y)
+
         CGWarpMouseCursorPosition(pt)
         if let move = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: pt, mouseButton: .left) {
             move.post(tap: .cghidEventTap)
@@ -204,12 +229,22 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             up.setIntegerValueField(.mouseEventClickState, value: Int64(clickCount))
             up.post(tap: .cghidEventTap)
         }
+
+        self.lastUserMousePos = NSPoint(x: x, y: self.screenFrame.height - y)
+        self.lastAutonomousActionTime = Date().timeIntervalSince1970 + 0.8
+        self.accumulatedUserDelta = 0
+        self.isExecutingAutonomousAction = false
     }
 
     func postMouseDrag(fromX: Double, fromY: Double, toX: Double, toY: Double, steps: Int = 15) {
         guard let source = CGEventSource(stateID: .hidSystemState) else { return }
         let start = CGPoint(x: fromX, y: fromY)
         let end = CGPoint(x: toX, y: toY)
+
+        self.isExecutingAutonomousAction = true
+        self.lastAutonomousActionTime = Date().timeIntervalSince1970
+        self.lastUserMousePos = NSPoint(x: toX, y: self.screenFrame.height - toY)
+        self.accumulatedUserDelta = 0
 
         CGWarpMouseCursorPosition(start)
         usleep(20000)
@@ -236,6 +271,11 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         if let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: end, mouseButton: .left) {
             up.post(tap: .cghidEventTap)
         }
+
+        self.lastUserMousePos = NSPoint(x: toX, y: self.screenFrame.height - toY)
+        self.lastAutonomousActionTime = Date().timeIntervalSince1970 + 0.8
+        self.accumulatedUserDelta = 0
+        self.isExecutingAutonomousAction = false
     }
 
     func postTypeText(_ text: String) {
@@ -378,6 +418,8 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             case "setMode":
                 if let newMode = json["mode"] as? String {
                     self.mode = newMode
+                    self.lastUserMousePos = NSEvent.mouseLocation
+                    self.lastAutonomousActionTime = Date().timeIntervalSince1970 + 0.8
                     self.callJS("window.setRexMode('\(newMode)')")
                     print("{\"event\":\"modeChanged\",\"mode\":\"\(newMode)\"}")
                     fflush(stdout)
@@ -402,7 +444,14 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                 let style = json["style"] as? String ?? self.currentStyle
                 self.targetX = CGFloat(x)
                 self.targetY = CGFloat(y)
+                self.isExecutingAutonomousAction = true
+                self.lastAutonomousActionTime = Date().timeIntervalSince1970 + (duration / 1000.0) + 1.2
+                self.lastUserMousePos = NSPoint(x: x, y: self.screenFrame.height - y)
+                self.accumulatedUserDelta = 0
                 self.callJS("window.moveToTarget(\(x), \(y), \(duration), '\(style)')")
+                DispatchQueue.main.asyncAfter(deadline: .now() + (duration / 1000.0)) { [weak self] in
+                    self?.isExecutingAutonomousAction = false
+                }
 
             case "followMouse":
                 let enabled = json["enabled"] as? Bool ?? true
@@ -546,13 +595,18 @@ class OverlayController: NSObject, NSApplicationDelegate, WKScriptMessageHandler
 
             case "resume":
                 self.mode = "autonomous"
+                self.accumulatedUserDelta = 0
                 self.lastUserMousePos = NSEvent.mouseLocation
+                self.lastAutonomousActionTime = Date().timeIntervalSince1970 + 1.0
                 self.callJS("window.showRexSpeech('Resuming autonomous control.', 3000, 'RESUMED')")
                 print("{\"event\":\"resumed\"}")
                 fflush(stdout)
 
             case "setBargeIn":
                 self.autonomousBargeInEnabled = json["enabled"] as? Bool ?? true
+                self.accumulatedUserDelta = 0
+                self.lastUserMousePos = NSEvent.mouseLocation
+                self.lastAutonomousActionTime = Date().timeIntervalSince1970 + 0.5
                 print("{\"event\":\"bargeInUpdated\",\"enabled\":\(self.autonomousBargeInEnabled)}")
                 fflush(stdout)
 
