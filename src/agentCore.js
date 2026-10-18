@@ -101,12 +101,71 @@ export async function automationDaemon() {
     }, 10000); // Check every 10s
 }
 
+export async function keepALookMenuTask() {
+    const url = await p.text({
+        message: 'Webpage URL to monitor:',
+        placeholder: 'https://example.com/tickets',
+        validate: (v) => !v.trim() ? 'URL is required.' : undefined
+    });
+    if (p.isCancel(url)) return;
+
+    const condition = await p.text({
+        message: 'Condition to watch for (optional, leave empty for any change):',
+        placeholder: 'tickets are available'
+    });
+    if (p.isCancel(condition)) return;
+
+    const action = await p.text({
+        message: 'Goal to execute once condition is met:',
+        placeholder: 'add 2 to checkout and take a screenshot of QR code',
+        validate: (v) => !v.trim() ? 'Goal is required.' : undefined
+    });
+    if (p.isCancel(action)) return;
+
+    const intervalStr = await p.text({
+        message: 'Check interval in seconds (default 30):',
+        placeholder: '30'
+    });
+    if (p.isCancel(intervalStr)) return;
+    const intervalSeconds = Number(intervalStr) || 30;
+
+    const selector = await p.text({
+        message: 'CSS selector to narrow down monitoring (optional):',
+        placeholder: '.ticket-booking-status'
+    });
+    if (p.isCancel(selector)) return;
+
+    const headless = await p.confirm({
+        message: 'Run browser in headless mode?',
+        initialValue: false
+    });
+    if (p.isCancel(headless)) return;
+
+    p.note(`Starting Keep-A-Look monitor job...\nURL: ${url}\nWatching: ${condition || 'Any content change'}\nAction: ${action}`, 'Keep-A-Look');
+
+    const { keep_a_look } = await import('./webTools.js');
+    try {
+        const res = await keep_a_look({
+            url: url.trim(),
+            condition: condition.trim(),
+            action: action.trim(),
+            intervalSeconds,
+            selector: selector.trim() || undefined,
+            headless
+        });
+        p.note(res, 'Keep-A-Look Done');
+    } catch (err) {
+        p.log.error(`Keep-A-Look Error: ${err.message}`);
+    }
+}
+
 export async function automationMenu() {
     const choice = await p.select({
         message: 'Advanced Automation:',
         options: [
             { value: 'schedule', label: '📅 Schedule New Task' },
             { value: 'list', label: '📋 List Scheduled Tasks' },
+            { value: 'look', label: '👀 Keep-A-Look (Monitor Webpage)' },
             { value: 'daemon', label: '🚀 Start Automation Daemon' },
             { value: 'back', label: '⬅️ Back' }
         ]
@@ -115,6 +174,7 @@ export async function automationMenu() {
     if (p.isCancel(choice) || choice === 'back') return;
 
     if (choice === 'schedule') await scheduleTask();
+    if (choice === 'look') await keepALookMenuTask();
     if (choice === 'list') {
         const tasks = loadTasks();
         if (tasks.length === 0) {

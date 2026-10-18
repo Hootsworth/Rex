@@ -11,11 +11,14 @@ const DEFAULT_CONFIG = {
   openaiKey: '',
   openaiModel: 'gpt-5-mini',
   geminiKey: '',
-  geminiModel: 'gemini-2.5-flash',
+  geminiModel: 'gemini-3.5-flash',
   claudeKey: '',
   claudeModel: 'claude-3-haiku-20240307',
   deepseekKey: '',
   deepseekModel: 'deepseek-chat',
+  cartesiaApiKey: 'sk_car_LR8Ze7pq8Yug9SpnbqUSjp',
+  cartesiaVoiceId: 'db6b0ed5-d5d3-463d-ae85-518a07d3c2b4',
+  cartesiaModelId: 'sonic-2',
   ollamaModel: 'llama3:latest', // Default model
   ollamaForceCpu: true,
   localLlamaForceCpu: true,
@@ -27,7 +30,7 @@ const DEFAULT_CONFIG = {
   agentRunnerProvider: 'openai',
   agentRunnerModel: 'gpt-5-mini',
   agentPlannerOpenAIModel: 'gpt-4o-mini',
-  agentPlannerGeminiModel: 'gemini-2.5-flash',
+  agentPlannerGeminiModel: 'gemini-3.5-flash',
   webAgentBudgetMode: 'balanced',
   babysitModeEnabled: true,
   babysitFollowCursor: true,
@@ -69,7 +72,31 @@ const DEFAULT_CONFIG = {
   // ─── Daily Digest (opt-in via Labs) ───
   dailyDigestEnabled: false,
   dailyDigestTime: '09:00',
-  dailyDigestChannel: 'cli'
+  dailyDigestChannel: 'cli',
+  // ─── Butler & JARVIS Proactivity (Opt-In) ───
+  alfredProactivityEnabled: false,
+  alfredBriefingTime: '08:30',
+  alfredEveningBriefingTime: '21:30',
+  alfredVoiceAnnounce: true,
+  alfredSentinelIntervalMins: 30,
+  audioCuesEnabled: true,
+  // ─── Google Integrations (Gmail & Calendar) ───
+  googleClientId: '',
+  googleClientSecret: '',
+  googleRefreshToken: '',
+  // ─── GitHub Integration ───
+  githubToken: '',
+  githubRepo: '',
+  // ─── Linear Integration ───
+  linearApiKey: '',
+  // ─── Notion Integration ───
+  notionToken: '',
+  notionDatabaseId: '',
+  // ─── WhatsApp Bot (Linked Device) ───
+  whatsappOwnerNumber: '',
+  whatsappAllowedNumbers: [],
+  whatsappPrefix: '',
+  whatsappRespondToSelf: true
 };
 
 // Model aliases for quick switching

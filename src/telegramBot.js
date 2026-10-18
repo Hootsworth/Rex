@@ -99,7 +99,7 @@ export async function startTelegramBot() {
     // ─── Persona resolution helper ───────────────────────────────────
 
     function resolvePriorityProvider(cfg) {
-        if (cfg.geminiKey) return { provider: 'gemini', model: cfg.geminiModel || 'gemini-2.5-flash' };
+        if (cfg.geminiKey) return { provider: 'gemini', model: cfg.geminiModel || 'gemini-3.5-flash' };
         if (cfg.openaiKey) return { provider: 'openai', model: cfg.openaiModel || 'gpt-5-mini' };
         if (cfg.claudeKey) return { provider: 'claude', model: cfg.claudeModel || 'claude-3-haiku-20240307' };
         if (cfg.deepseekKey) return { provider: 'deepseek', model: cfg.deepseekModel || 'deepseek-chat' };
@@ -206,7 +206,7 @@ export async function startTelegramBot() {
         const modelName = args.slice(1).join(' ').trim();
 
         if (!provider || !modelName) {
-            return ctx.reply('Usage: /setmodel <provider> <model-name>\nExample: /setmodel gemini gemini-2.5-flash');
+            return ctx.reply('Usage: /setmodel <provider> <model-name>\nExample: /setmodel gemini gemini-3.5-flash');
         }
 
         const cfg = loadConfig();

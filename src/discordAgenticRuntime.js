@@ -15,6 +15,7 @@ import { parseIntent } from './intentPipeline/intentParser.js';
 import { runAction } from './intentPipeline/actionRouter.js';
 import { getAllowedDirs, isDiscordUserAllowed } from './intentPipeline/security.js';
 import { rememberCommand, getRecentMemory } from './intentPipeline/memoryStore.js';
+import { loadConfig } from './config.js';
 
 const EPISODES_DIR = path.join(process.cwd(), '.rex-data');
 const EPISODES_FILE = path.join(EPISODES_DIR, 'discord-episodes.json');
@@ -22,10 +23,22 @@ const execAsync = promisify(exec);
 const FREEFALL_ROOT = path.join(process.cwd(), '.rex-data', 'freefall');
 const FREEFALL_ALLOWED_PREFIX = path.resolve(process.cwd(), 'src');
 
-const NANO_TARGET = {
-    provider: 'openai',
-    model: 'gpt-5-nano'
-};
+function getFreefallTarget() {
+    const config = loadConfig();
+    if (config.geminiKey) {
+        return { provider: 'gemini', model: config.geminiModel || 'gemini-3.7-flash-lite' };
+    }
+    if (config.openaiKey) {
+        return { provider: 'openai', model: config.openaiModel || 'gpt-5-nano' };
+    }
+    if (config.claudeKey) {
+        return { provider: 'claude', model: config.claudeModel || 'claude-3-5-sonnet-20241022' };
+    }
+    if (config.deepseekKey) {
+        return { provider: 'deepseek', model: config.deepseekModel || 'deepseek-chat' };
+    }
+    return { provider: 'gemini', model: 'gemini-3.5-flash' };
+}
 
 function shouldRequestHumanInput({ ok, text = '', intentMissing = false }) {
     if (intentMissing) return true;
@@ -96,7 +109,7 @@ function appendSessionDoc(sessionDir, fileName, lines) {
 }
 
 async function runNanoPrompt(prompt) {
-    return await runCompletionWithTarget([{ role: 'user', content: prompt }], NANO_TARGET);
+    return await runCompletionWithTarget([{ role: 'user', content: prompt }], getFreefallTarget());
 }
 
 async function listEligibleSourceFiles() {
@@ -483,7 +496,12 @@ export function createDiscordAgenticRuntime(config) {
                 .addBooleanOption((opt) => opt.setName('strict_no_auto_apply').setDescription('If true, Freefall never applies changes without button approval').setRequired(false)),
             new SlashCommandBuilder()
                 .setName('freefall_stop')
-                .setDescription('Stop Freefall and receive full version/change report')
+                .setDescription('Stop Freefall and receive full version/change report'),
+            new SlashCommandBuilder()
+                .setName('preflight')
+                .setDescription('Scan a website and generate navigation specs, SDKs, and agent tools')
+                .addStringOption((opt) => opt.setName('url').setDescription('Target URL to scan').setRequired(true))
+                .addStringOption((opt) => opt.setName('name').setDescription('Project name (defaults to hostname)').setRequired(false))
         ];
     }
 
@@ -677,8 +695,9 @@ export function createDiscordAgenticRuntime(config) {
     }
 
     async function handleFreefallStart(interaction) {
-        if (!config.openaiKey) {
-            await interaction.reply({ content: 'Freefall requires OpenAI key because it is locked to gpt-5-nano.', ephemeral: true });
+        const hasKey = Boolean(config.geminiKey || config.openaiKey || config.claudeKey || config.deepseekKey || config.ollamaHost);
+        if (!hasKey) {
+            await interaction.reply({ content: 'Freefall requires an active AI provider key (Gemini, OpenAI, Claude, or DeepSeek).', ephemeral: true });
             return;
         }
 
@@ -1004,6 +1023,94 @@ export function createDiscordAgenticRuntime(config) {
         });
     }
 
+    async function handlePreflightCommand(interaction) {
+        const url = interaction.options.getString('url', true);
+        const name = interaction.options.getString('name', false) || '';
+
+        const scanEmbed = new EmbedBuilder()
+            .setTitle('🐟 Preflight Designer')
+            .setDescription(`Scanning **${url}**...\nThis may take 1-3 minutes. Rex is crawling pages, analyzing the DOM, classifying semantic actions, and intercepting API calls.`)
+            .setColor(0x06b6d4)
+            .setFooter({ text: 'Preflight Designer · Website Compiler' })
+            .setTimestamp(new Date());
+
+        await interaction.deferReply();
+        await interaction.editReply({ embeds: [scanEmbed] });
+
+        try {
+            const { isVenvReady, ensurePreflightVenv, runPreflightScan, copySpecsToOutput } = await import('./preflightDesigner.js');
+
+            if (!isVenvReady()) {
+                await interaction.editReply({ embeds: [scanEmbed.setDescription(`Setting up Preflight Designer environment for the first time...`)] });
+                const setup = await ensurePreflightVenv();
+                if (!setup.ok) {
+                    await interaction.editReply({ embeds: [scanEmbed.setDescription(`❌ Setup failed: ${setup.message}`).setColor(0xef4444)] });
+                    return;
+                }
+            }
+
+            const result = await runPreflightScan(url, { name: name || undefined });
+
+            if (!result.ok) {
+                await interaction.editReply({ embeds: [scanEmbed.setDescription(`❌ Scan failed: ${result.error}`).setColor(0xef4444)] });
+                return;
+            }
+
+            const s = result.summary;
+            const actionsField = result.actions
+                ? result.actions.map(a => {
+                    const icon = a.type === 'api' ? '⚡' : '🖱️';
+                    const api = a.api_url ? ` → \`${a.api_method} ${a.api_url}\`` : '';
+                    return `${icon} **${a.name}** — ${a.description}${api}`;
+                }).join('\n')
+                : 'None';
+
+            const workflowsField = result.workflows
+                ? result.workflows.map(w => `📈 **${w.name}** — ${w.steps.join(' → ')}`).join('\n')
+                : 'None';
+
+            const resultEmbed = new EmbedBuilder()
+                .setTitle('🐟 Preflight Scan Complete!')
+                .setDescription(`Website compiled successfully into navigation specs.`)
+                .addFields(
+                    { name: 'Project', value: result.project_name, inline: true },
+                    { name: 'URL', value: result.url, inline: true },
+                    { name: 'Actions', value: `${s.total_actions} (${s.browser_actions} browser, ${s.api_upgrades} API)`, inline: true },
+                    { name: 'Workflows', value: `${s.workflows} sequential flows`, inline: true },
+                    { name: 'Discovered Actions', value: actionsField.slice(0, 1024) || 'None', inline: false },
+                    { name: 'Workflows', value: workflowsField.slice(0, 1024) || 'None', inline: false }
+                )
+                .setColor(0x22c55e)
+                .setFooter({ text: '📦 Generated: preflight.yaml, sdk.py, sdk.ts, tools.json, mcp_server.py' })
+                .setTimestamp(new Date());
+
+            // Copy specs and try to attach YAML file
+            const specsDir = path.join(process.cwd(), '.rex', 'preflight-specs', result.project_name);
+            const copied = copySpecsToOutput(specsDir);
+            const yamlPath = path.join(specsDir, 'preflight.yaml');
+
+            const replyPayload = { embeds: [resultEmbed] };
+            if (fs.existsSync(yamlPath)) {
+                replyPayload.files = [yamlPath];
+            }
+
+            await interaction.editReply(replyPayload);
+
+            appendEpisode({
+                source: 'preflight',
+                objective: `Scan ${url}`,
+                step: 'completed',
+                success: true,
+                resultText: `${s.total_actions} actions, ${s.api_upgrades} API upgrades, ${s.workflows} workflows`
+            });
+
+        } catch (e) {
+            await interaction.editReply({
+                embeds: [scanEmbed.setDescription(`❌ Scan failed: ${e.message}`).setColor(0xef4444)]
+            });
+        }
+    }
+
     async function handleInteraction(interaction) {
         if (interaction.isChatInputCommand()) {
             if (interaction.commandName === 'goal') {
@@ -1047,6 +1154,10 @@ export function createDiscordAgenticRuntime(config) {
                     files: [ended.summaryPath],
                     components: [row]
                 });
+                return true;
+            }
+            if (interaction.commandName === 'preflight') {
+                await handlePreflightCommand(interaction);
                 return true;
             }
             return false;

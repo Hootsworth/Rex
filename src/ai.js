@@ -42,6 +42,15 @@ let openaiClientInstance = null;
 let openaiClientKey = '';
 let localLlamaPromptChain = Promise.resolve();
 
+export function normalizeGeminiModel(name) {
+    if (!name) return 'gemini-3.5-flash';
+    const clean = String(name).trim().toLowerCase();
+    if (clean === 'gemini 3.5 flash' || clean === 'gemini-3.5-flash' || clean === '3.5 flash' || clean === '3.5-flash') return 'gemini-3.5-flash';
+    if (clean === 'gemini 3.6flash' || clean === 'gemini 3.6 flash' || clean === 'gemini-3.6-flash' || clean === 'gemini-3.6flash' || clean === '3.6flash' || clean === '3.6 flash') return 'gemini-3.6-flash';
+    if (clean === 'gemini 3.7 flash - lite' || clean === 'gemini 3.7 flash-lite' || clean === 'gemini-3.7-flash-lite' || clean === 'gemini 3.7-flash-lite' || clean === '3.7 flash - lite' || clean === '3.7 flash-lite') return 'gemini-3.7-flash-lite';
+    return name;
+}
+
 
 export async function checkOllamaStatus() {
     return new Promise((resolve) => {
@@ -132,11 +141,24 @@ export async function runCompletion(messages, signal = null, complexity = 'high'
         if (signal?.aborted) throw new Error('Aborted');
 
         const genAI = new GoogleGenerativeAI(config.geminiKey);
-        const allowedGeminiModels = new Set(['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite']);
-        const configuredGeminiModel = String(config.geminiModel || 'gemini-2.5-flash').trim();
-        const selectedGeminiModel = allowedGeminiModels.has(configuredGeminiModel)
+        const allowedGeminiModels = new Set([
+            'gemini-3.5-flash',
+            'gemini-3.6-flash',
+            'gemini-3.7-flash-lite',
+            'gemini 3.5 flash',
+            'gemini 3.6flash',
+            'gemini 3.6 flash',
+            'gemini 3.7 flash - lite',
+            'gemini 3.7 flash-lite',
+            'gemini-2.5-flash',
+            'gemini-2.0-flash',
+            'gemini-2.5-flash-lite'
+        ]);
+        const configuredGeminiModel = String(config.geminiModel || 'gemini-3.5-flash').trim();
+        const rawGeminiModel = allowedGeminiModels.has(configuredGeminiModel)
             ? configuredGeminiModel
-            : 'gemini-2.5-flash';
+            : 'gemini-3.5-flash';
+        const selectedGeminiModel = normalizeGeminiModel(rawGeminiModel);
         const model = genAI.getGenerativeModel({ model: selectedGeminiModel });
 
         let systemInstruction = undefined;
@@ -342,7 +364,8 @@ export async function runCompletionWithTarget(messages, target = {}, signal = nu
         if (!config.geminiKey) throw new Error('Gemini key is missing! Please configure it in Settings.');
         if (signal?.aborted) throw new Error('Aborted');
         const genAI = new GoogleGenerativeAI(config.geminiKey);
-        const gm = genAI.getGenerativeModel({ model });
+        const resolvedModel = normalizeGeminiModel(model || config.geminiModel || 'gemini-3.5-flash');
+        const gm = genAI.getGenerativeModel({ model: resolvedModel });
         const combinedPrompt = formattedMessages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
 
         const resultPromise = gm.generateContent(combinedPrompt);

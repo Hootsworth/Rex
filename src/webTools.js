@@ -692,6 +692,69 @@ function appendAutonomousBrowserDebug(entry) {
     }
 }
 
+async function visuallyGroundElement(page, selectorOrText, promptGoal = '') {
+    try {
+        const screenshotDir = path.join(process.cwd(), '.agent');
+        if (!fs.existsSync(screenshotDir)) fs.mkdirSync(screenshotDir, { recursive: true });
+        const screenshotPath = path.join(screenshotDir, 'viewport.png');
+        await page.screenshot({ path: screenshotPath });
+
+        const base64Image = fs.readFileSync(screenshotPath, 'base64');
+        const response = await fetch('http://127.0.0.1:11434/api/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: 'llava',
+                prompt: `Analyze this browser screenshot. Is the element "${selectorOrText}" (Goal: ${promptGoal}) visible and interactive on this screen? Respond with 'YES' or 'NO', followed by a very brief explanation of its visual location (e.g., top-right next to search bar).`,
+                images: [base64Image],
+                stream: false
+            })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            const textResponse = String(data.response || '').trim();
+            appendAutonomousBrowserDebug({
+                source: 'visuallyGroundElement',
+                selectorOrText,
+                response: textResponse
+            });
+            return {
+                ok: true,
+                visible: !textResponse.toUpperCase().includes('NO'),
+                explanation: textResponse
+            };
+        }
+        return { ok: false, error: `Ollama response status ${response.status}` };
+    } catch (err) {
+        return { ok: false, error: err.message };
+    }
+}
+
+export async function fetchLocalSearchGrounding(query) {
+    try {
+        const encoded = encodeURIComponent(query);
+        const url = `https://html.duckduckgo.com/html/?q=${encoded}`;
+        const res = await fetch(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        });
+        if (!res.ok) return '';
+        const html = await res.text();
+        const snippets = [];
+        const regex = /<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+        let match;
+        while ((match = regex.exec(html)) !== null && snippets.length < 5) {
+            const cleanText = match[1].replace(/<[^>]*>/g, '').trim();
+            if (cleanText) snippets.push(cleanText);
+        }
+        return snippets.join('\n');
+    } catch {
+        return '';
+    }
+}
+
 function shouldForceHeadlessInCi() {
     const isCi = String(process.env.CI || '').toLowerCase() === 'true'
         || String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true';
@@ -807,16 +870,28 @@ class BrowserManager {
             const { chromium } = await import('playwright');
             const extensionPaths = resolveNavigationExtensionPaths();
 
-            if (extensionPaths.length > 0) {
-                const profilePath = path.join(process.cwd(), '.agent', 'playwright-profile');
-                if (!fs.existsSync(profilePath)) fs.mkdirSync(profilePath, { recursive: true });
+            const sandboxProfilePath = path.join(process.cwd(), '.agent', 'browser-sandbox-profile');
+            if (!fs.existsSync(sandboxProfilePath)) fs.mkdirSync(sandboxProfilePath, { recursive: true });
 
+            const defaultStealthArgs = [
+                '--disable-blink-features=AutomationControlled',
+                '--disable-infobars',
+                '--no-sandbox',
+                '--disable-setuid-sandbox'
+            ];
+            const defaultUserAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+            const defaultViewport = { width: 1280, height: 800 };
+
+            if (extensionPaths.length > 0) {
                 const joinedPaths = extensionPaths.join(',');
 
                 try {
-                    this.context = await chromium.launchPersistentContext(profilePath, {
+                    this.context = await chromium.launchPersistentContext(sandboxProfilePath, {
                         headless: isHeadless,
+                        userAgent: defaultUserAgent,
+                        viewport: defaultViewport,
                         args: [
+                            ...defaultStealthArgs,
                             `--disable-extensions-except=${joinedPaths}`,
                             `--load-extension=${joinedPaths}`
                         ]
@@ -833,25 +908,37 @@ class BrowserManager {
                         error: extErr?.message || String(extErr)
                     });
 
-                    this.browser = await chromium.launch({ headless: isHeadless });
-                    this.context = await this.browser.newContext();
+                    this.context = await chromium.launchPersistentContext(sandboxProfilePath, {
+                        headless: isHeadless,
+                        userAgent: defaultUserAgent,
+                        viewport: defaultViewport,
+                        args: defaultStealthArgs
+                    });
+                    this.browser = this.context.browser();
                     this.usingExtension = false;
                     this.extensionPath = '';
                     this.extensionPaths = [];
                 }
             } else {
-                this.browser = await chromium.launch({ headless: isHeadless });
-                this.context = await this.browser.newContext();
+                this.context = await chromium.launchPersistentContext(sandboxProfilePath, {
+                    headless: isHeadless,
+                    userAgent: defaultUserAgent,
+                    viewport: defaultViewport,
+                    args: defaultStealthArgs
+                });
+                this.browser = this.context.browser();
                 this.usingExtension = false;
                 this.extensionPath = '';
                 this.extensionPaths = [];
             }
 
-            // Do not eagerly open a new tab here; we normalize tabs after context load.
-        }
-
-        if (!this.context) {
-            this.context = await this.browser.newContext();
+            // Inject stealth scripts
+            await this.context.addInitScript(() => {
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                window.chrome = { runtime: {} };
+                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+            });
         }
 
         // Rebuild page list from context in case tabs were opened/closed outside manager bookkeeping.
@@ -1628,6 +1715,115 @@ async function ensureVisualCursor(page, style = 'default') {
             el.appendChild(fallback);
         }
 
+        // 8-Bit Baby T-Rex Dino Companion alongside Cursor
+        const dinoWrap = document.createElement('div');
+        dinoWrap.className = 'rex-visual-dino-wrap';
+        dinoWrap.style.cssText = 'position:absolute;left:16px;top:10px;pointer-events:none;filter:drop-shadow(0 4px 8px rgba(0,0,0,0.45));';
+
+        const dinoCanvas = document.createElement('canvas');
+        dinoCanvas.width = 32;
+        dinoCanvas.height = 32;
+        dinoCanvas.style.cssText = 'width:36px;height:36px;image-rendering:pixelated;';
+        dinoWrap.appendChild(dinoCanvas);
+        el.appendChild(dinoWrap);
+
+        const dCtx = dinoCanvas.getContext('2d');
+        if (dCtx) dCtx.imageSmoothingEnabled = false;
+
+        let dFrame = 0;
+        let dState = 'idle'; // 'idle', 'walk', 'happy'
+        let dBlink = false;
+
+        const C = {
+            g1: '#38ef7d', g2: '#11998e', g3: '#0b5345',
+            y1: '#f9ca24', y2: '#f0932b', w: '#ffffff',
+            k: '#130f40', p: '#ff7979', o: '#eb4d4b'
+        };
+
+        function drawRect(x, y, w, h, col) {
+            if (!dCtx) return;
+            dCtx.fillStyle = col;
+            dCtx.fillRect(x, y, w, h);
+        }
+
+        function renderVisualDino() {
+            if (!dCtx) return;
+            dCtx.clearRect(0, 0, 32, 32);
+            let bounceY = 0;
+            if (dState === 'idle') bounceY = (Math.floor(dFrame / 25) % 2 === 0) ? 0 : 1;
+            else if (dState === 'walk') bounceY = (Math.floor(dFrame / 8) % 2 === 0) ? 0 : 2;
+            else if (dState === 'happy') bounceY = (Math.floor(dFrame / 6) % 2 === 0) ? 0 : 3;
+
+            const y0 = 4 - bounceY;
+
+            // Spikes
+            drawRect(9, y0 + 5, 2, 2, C.g3);
+            drawRect(8, y0 + 9, 2, 2, C.g3);
+            drawRect(7, y0 + 13, 2, 2, C.g3);
+
+            // Head
+            drawRect(11, y0 + 3, 13, 11, C.g1);
+            drawRect(24, y0 + 6, 4, 8, C.g1);
+            drawRect(10, y0 + 4, 1, 9, C.g3);
+            drawRect(11, y0 + 2, 13, 1, C.g3);
+            drawRect(24, y0 + 5, 4, 1, C.g3);
+            drawRect(28, y0 + 6, 1, 7, C.g3);
+            drawRect(11, y0 + 12, 13, 2, C.g2);
+            drawRect(24, y0 + 12, 3, 2, C.g2);
+
+            // Eye
+            if (dBlink) {
+                drawRect(17, y0 + 7, 5, 1, C.k);
+            } else {
+                drawRect(17, y0 + 5, 5, 5, C.w);
+                drawRect(19, y0 + 6, 3, 4, C.k);
+                drawRect(19, y0 + 6, 1, 1, C.w);
+            }
+
+            // Blush & Snout
+            drawRect(15, y0 + 10, 3, 2, C.p);
+            drawRect(24, y0 + 10, 3, 1, C.g3);
+
+            // Body
+            drawRect(10, y0 + 14, 12, 11, C.g1);
+            drawRect(9, y0 + 15, 1, 9, C.g3);
+            drawRect(10, y0 + 23, 12, 2, C.g2);
+            drawRect(16, y0 + 14, 6, 8, C.y1);
+            drawRect(17, y0 + 21, 5, 1, C.y2);
+
+            // Arms
+            if (dState === 'happy') {
+                drawRect(22, y0 + 13, 3, 2, C.g1);
+            } else {
+                drawRect(21, y0 + 16, 3, 2, C.g1);
+            }
+
+            // Tail wag
+            const tailWag = (Math.floor(dFrame / 14) % 2 === 0);
+            if (tailWag) {
+                drawRect(6, y0 + 18, 4, 4, C.g1);
+                drawRect(3, y0 + 19, 3, 3, C.g1);
+                drawRect(2, y0 + 20, 2, 2, C.g1);
+            } else {
+                drawRect(6, y0 + 19, 4, 4, C.g1);
+                drawRect(3, y0 + 21, 3, 3, C.g1);
+                drawRect(1, y0 + 23, 2, 2, C.g1);
+            }
+
+            // Feet
+            drawRect(12, y0 + 25, 3, 3, C.g3);
+            drawRect(17, y0 + 25, 3, 3, C.g3);
+        }
+
+        function dinoAnimLoop() {
+            dFrame++;
+            if (dFrame % 180 === 0) dBlink = true;
+            if (dFrame % 180 === 12) dBlink = false;
+            renderVisualDino();
+            requestAnimationFrame(dinoAnimLoop);
+        }
+        requestAnimationFrame(dinoAnimLoop);
+
         document.documentElement.appendChild(el);
 
         const state = {
@@ -1658,6 +1854,7 @@ async function ensureVisualCursor(page, style = 'default') {
         const moveTo = (x, y, duration = 260) => new Promise((resolve) => {
             if (state.raf) cancelAnimationFrame(state.raf);
 
+            dState = 'walk';
             const startX = state.x;
             const startY = state.y;
             const endX = x;
@@ -1674,6 +1871,7 @@ async function ensureVisualCursor(page, style = 'default') {
                     state.raf = requestAnimationFrame(tick);
                 } else {
                     state.raf = null;
+                    dState = 'idle';
                     resolve();
                 }
             };
@@ -1684,9 +1882,11 @@ async function ensureVisualCursor(page, style = 'default') {
         const clickPulse = () => {
             const before = state.style || 'default';
             const pressed = icons.handgrabbing ? 'handgrabbing' : before;
+            dState = 'happy';
             showOnly(pressed);
             window.setTimeout(() => {
                 showOnly(before);
+                dState = 'idle';
             }, 170);
         };
 
@@ -2747,6 +2947,15 @@ export async function browser_interact(args, signal = null) {
 
     try {
         const cfg = loadConfig();
+
+        // local model gate (credit protection)
+        if (process.env.KEEP_A_LOOK_TEST_MOCK !== 'true') {
+            const activeModel = String(cfg.aiModel || '').toLowerCase();
+            if (!activeModel.includes('ollama') && !activeModel.includes('local') && !activeModel.includes('llama')) {
+                return `Browser Error: Browser interaction is blocked to prevent cloud credit drainage. Active model is "${cfg.aiModel}". To enable browser automation, please switch to a local Ollama model (e.g., /model ollama).`;
+            }
+        }
+
         const runHeadless = args.mode === 'headless' || !!cfg.webAgentHeadless;
         const page = await manager.getPage({ headless: runHeadless });
         await ensureVisualCursor(page, pickBrowserCursorStyle('default'));
@@ -2763,6 +2972,105 @@ export async function browser_interact(args, signal = null) {
         let recoveryPrefix = readiness.recovered ? `${readiness.message}\n` : '';
 
         // Normalization
+        if (action === 'preflight_execute') {
+            const { getPreflightSpecJsonForUrl } = await import('./preflightDesigner.js');
+            const targetUrl = page.url() || '';
+            const matched = await getPreflightSpecJsonForUrl(targetUrl);
+            if (!matched) {
+                return `Error: No Preflight spec compiled for domain "${targetUrl}". Please run preflight_scan tool on this website first.`;
+            }
+
+            const { methodName, params } = args;
+            if (!methodName) return 'Error: preflight_execute requires a "methodName" argument.';
+
+            const specActions = matched.spec?.actions;
+            const targetAction = specActions?.[methodName];
+            if (!targetAction) {
+                return `Error: Action "${methodName}" not defined in preflight.yaml for this site. Available actions: ${Object.keys(specActions || {}).join(', ')}`;
+            }
+
+            const actionType = String(targetAction.action_type || 'browser').toLowerCase();
+            const actionParams = targetAction.parameters || [];
+            
+            // Validate required parameters
+            const validatedParams = {};
+            for (const param of actionParams) {
+                const name = param.name;
+                const required = param.required === true;
+                const val = params?.[name];
+                if (required && (val === undefined || val === null || val === '')) {
+                    return `Error: Parameter "${name}" is required for action "${methodName}".`;
+                }
+                validatedParams[name] = val;
+            }
+
+            if (actionType === 'api' && targetAction.api) {
+                // High-performance API execution bypassing visual browser steps!
+                const apiDef = targetAction.api;
+                const pathUrl = apiDef.url;
+                const method = String(apiDef.method || 'POST').toUpperCase();
+                
+                // Fetch page cookies
+                const cookies = await context.cookies();
+                const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+
+                // Build full API endpoint URL
+                const origin = new URL(targetUrl).origin;
+                const fullApiUrl = pathUrl.startsWith('http') ? pathUrl : `${origin}${pathUrl}`;
+
+                // Replace path parameters if any (e.g. /product/{id})
+                let endpointUrl = fullApiUrl;
+                for (const k of Object.keys(validatedParams)) {
+                    endpointUrl = endpointUrl.replace(`{${k}}`, encodeURIComponent(validatedParams[k]));
+                }
+
+                // Dispatch direct fetch API request
+                const fetchHeaders = {
+                    'Content-Type': 'application/json',
+                    'Cookie': cookieHeader,
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                };
+                
+                const fetchBody = method !== 'GET' ? JSON.stringify(validatedParams) : undefined;
+                
+                const response = await fetch(endpointUrl, {
+                    method,
+                    headers: fetchHeaders,
+                    body: fetchBody
+                });
+
+                const responseText = await response.text();
+                manager.lastHealthyUrl = page.url() || manager.lastHealthyUrl;
+
+                return `[API Upgrade] Executed ${methodName} via API ${method} ${endpointUrl}. Status: ${response.status}. Response: ${responseText.substring(0, 500)}`;
+            } else {
+                // DOM Browser interaction workflow execution!
+                // Type values into input fields
+                for (const param of actionParams) {
+                    const name = param.name;
+                    const val = validatedParams[name];
+                    const paramSelector = param.selector;
+                    if (val !== undefined && val !== null && val !== '' && paramSelector) {
+                        await page.waitForSelector(paramSelector, { timeout: 8000 });
+                        await page.locator(paramSelector).fill(String(val));
+                    }
+                }
+
+                // Trigger main action submit selector
+                const triggerSelector = targetAction.selector;
+                if (triggerSelector) {
+                    await page.waitForSelector(triggerSelector, { timeout: 8000 });
+                    await page.locator(triggerSelector).click();
+                    await page.waitForLoadState('networkidle').catch(() => {});
+                }
+
+                manager.lastHealthyUrl = page.url() || manager.lastHealthyUrl;
+                const title = await page.title().catch(() => 'Page');
+                
+                return `[DOM workflow] Executed semantic action "${methodName}". Title: "${title}". URL: ${page.url()}`;
+            }
+        }
+
         if (action === 'back') {
             await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
             if (isBlankUrl(page.url())) {
@@ -2991,6 +3299,24 @@ export async function browser_interact(args, signal = null) {
             report.preflgihtAnalysePlot = plotSummary;
             report.preflightAnalysePlot = plotSummary;
 
+            try {
+                const { getPreflightSpecJsonForUrl } = await import('./preflightDesigner.js');
+                const specData = await getPreflightSpecJsonForUrl(health.url);
+                if (specData) {
+                    report.preflightDesignerSpec = {
+                        projectName: specData.projectName,
+                        rootUrl: specData.rootUrl,
+                        actions: Object.entries(specData.spec?.actions || {}).map(([name, act]) => ({
+                            name,
+                            type: act.action_type || act.type,
+                            description: act.description
+                        }))
+                    };
+                }
+            } catch (e) {
+                // Ignore
+            }
+
             if (health.url && health.url !== 'about:blank') {
                 manager.lastHealthyUrl = health.url;
             }
@@ -3117,6 +3443,10 @@ export async function browser_interact(args, signal = null) {
         } else if (action === 'search') {
             const searchQuery = (args.query || text || '').trim();
             if (!searchQuery) return 'Error: search action requires "query" or "text".';
+            
+            // Native Search Grounding (DuckDuckGo snippets)
+            const groundingSnippet = await fetchLocalSearchGrounding(searchQuery);
+
             const searchRes = await resilientSearch(page, searchQuery);
             if (!searchRes.ok) {
                 return `Error: search failed for "${searchQuery}": ${searchRes.error}`;
@@ -3125,7 +3455,8 @@ export async function browser_interact(args, signal = null) {
             await smartHandleConsentAndOverlays(page, { maxClicks: 1, preferReject: true });
             await page.waitForTimeout(1000);
             const title = await page.title().catch(() => 'Search Results');
-            result = `${recoveryPrefix}Searched for "${searchQuery}". Title: "${title}". URL: ${searchRes.url}`;
+            const groundingInfo = groundingSnippet ? `\n\n[Search Grounding Snippets]:\n${groundingSnippet}` : '';
+            result = `${recoveryPrefix}Searched for "${searchQuery}". Title: "${title}". URL: ${searchRes.url}${groundingInfo}`;
         } else if (action === 'click') {
             const resolved = await resolveTargetSelector(page, {
                 action,
@@ -3143,6 +3474,11 @@ export async function browser_interact(args, signal = null) {
 
             const resolvedSelector = resolved.selector;
             await page.waitForSelector(resolvedSelector, { timeout: 8000 });
+
+            // Visual Grounding verification using Ollama Vision
+            if (process.env.KEEP_A_LOOK_TEST_MOCK !== 'true') {
+                await visuallyGroundElement(page, resolvedSelector, String(args.query || args.text || 'click target'));
+            }
 
             await cursorMoveToSelector(page, resolvedSelector, 250, pickBrowserCursorStyle('click'));
 
@@ -3187,6 +3523,11 @@ export async function browser_interact(args, signal = null) {
 
             const resolvedSelector = resolved.selector;
             await page.waitForSelector(resolvedSelector, { timeout: 8000 });
+
+            // Visual Grounding verification using Ollama Vision
+            if (process.env.KEEP_A_LOOK_TEST_MOCK !== 'true') {
+                await visuallyGroundElement(page, resolvedSelector, String(args.query || args.text || 'type target'));
+            }
 
             await cursorMoveToSelector(page, resolvedSelector, 230, pickBrowserCursorStyle('type'));
 
@@ -3357,6 +3698,34 @@ async function getVisiblePageSummary(page, focusQuery = '') {
     } catch {
         return { text: '', headings: [], likelyAnswerBlocks: '', meta: { source: 'none', ocrUsed: false } };
     }
+}
+
+function formatPreflightSpecForPrompt(spec) {
+    if (!spec || !spec.actions) return '';
+    
+    let res = '\nPREFLIGHT DESIGNER WEBSITE MAP (Discovered Actions & API Upgrades for this site):\n';
+    for (const [name, act] of Object.entries(spec.actions)) {
+        const type = act.action_type || act.type || 'browser';
+        res += `- Action: "${name}"\n`;
+        res += `  Description: ${act.description || 'No description'}\n`;
+        res += `  Type: ${type}\n`;
+        if (type === 'browser' && act.selector) {
+            res += `  Selector: "${act.selector}"\n`;
+        }
+        
+        const params = act.parameters || [];
+        if (params.length > 0) {
+            res += `  Parameters:\n`;
+            for (const p of params) {
+                res += `    - ${p.name} (${p.type || 'string'}${p.required ? ', required' : ''})${p.selector ? ` -> selector: "${p.selector}"` : ''}\n`;
+            }
+        }
+        
+        if (type === 'api' && act.api) {
+            res += `  API Upgrade Available: ${act.api.method || 'POST'} ${act.api.url}\n`;
+        }
+    }
+    return res + '\n';
 }
 
 /**
@@ -3580,6 +3949,18 @@ export async function run_autonomous_web_agent(goal, signal = null) {
                 }
             }
 
+            let preflightDesignerSpecStr = '';
+            let matchedSpecData = null;
+            try {
+                const { getPreflightSpecJsonForUrl } = await import('./preflightDesigner.js');
+                matchedSpecData = await getPreflightSpecJsonForUrl(currentUrl);
+                if (matchedSpecData) {
+                    preflightDesignerSpecStr = formatPreflightSpecForPrompt(matchedSpecData.spec);
+                }
+            } catch (e) {
+                // Ignore
+            }
+
             const plannerContext = buildWebPlannerContext(planState, {
                 url: currentUrl,
                 title: pageTitle,
@@ -3591,7 +3972,7 @@ You are interacting with a browser that has visual numeric markers (e.g., [1], [
 
 Goal: ${normalizedGoal}
 Current URL: ${currentUrl}
-Current Page Title: ${pageTitle}
+Current Page Title: ${pageTitle}${preflightDesignerSpecStr}
 ACTION HISTORY (Last 5): ${actionHistory.slice(-5).map((h) => `${h.action}(${h.id || ''})`).join(' -> ') || 'None'}
 ${stuckWarning}
 Last Action Result: ${lastResult}
@@ -3611,11 +3992,12 @@ ${JSON.stringify(markers, null, 2)}
 Rules:
 - FACTUAL ANCHORING: Do not invent page facts.
 - ANSWER-FIRST: If page summary already answers the goal, choose "done".
-- Use numeric IDs, never guessed CSS selectors.
+- Use numeric IDs for standard DOM actions, or use preflight_action if a spec matches.
 - If blocked/failing, update subplan and pivot.
+- PREFLIGHT ACTIONS: If a PREFLIGHT DESIGNER WEBSITE MAP is present, prefer using "action": "preflight_action" with "name": "<action_name>" and optional "params": {"<name>": "<value>"} rather than clicking around blindly.
 
 Respond with exactly one JSON object:
-{"thought":"...","plan":{"objective":"...","tasks":[{"id":"T1","title":"...","status":"pending|in-progress|done|blocked"}]},"execution":{"mode":"main|subplan","currentTaskId":"T1","note":"..."},"subplan":{"id":"SP-1","parentTaskId":"T1","trigger":"...","steps":[{"id":"SP1","title":"...","status":"pending|in-progress|done|blocked"}]},"action":"search|navigate|click|type|scroll|hover|back|refresh|done","url":"...","id":"...","text":"...","query":"...","reasoning":"..."}
+{"thought":"...","plan":{"objective":"...","tasks":[{"id":"T1","title":"...","status":"pending|in-progress|done|blocked"}]},"execution":{"mode":"main|subplan","currentTaskId":"T1","note":"..."},"subplan":{"id":"SP-1","parentTaskId":"T1","trigger":"...","steps":[{"id":"SP1","title":"...","status":"pending|in-progress|done|blocked"}]},"action":"search|navigate|click|type|scroll|hover|back|refresh|preflight_action|done","url":"...","id":"...","text":"...","query":"...","name":"...","params":{},"reasoning":"..."}
 Omit subplan when there is no active issue.`;
 
             const plannerComplexity = (planState.execution.mode === 'subplan' || planState.counters.issueCount >= 2)
@@ -3634,7 +4016,7 @@ Omit subplan when there is no active issue.`;
                 plannerTarget = {
                     provider,
                     model: provider === 'gemini'
-                        ? (config.agentPlannerGeminiModel || 'gemini-2.5-flash')
+                        ? (config.agentPlannerGeminiModel || 'gemini-3.5-flash')
                         : (config.agentPlannerOpenAIModel || 'gpt-4o-mini')
                 };
             }
@@ -3942,6 +4324,134 @@ Omit subplan when there is no active issue.`;
                 }
             }
 
+            if (command.action === 'preflight_action') {
+                try {
+                    const actionName = command.name;
+                    if (!actionName) {
+                        noteWebPlannerIssue(planState, 'preflight_action_missing_name', 'missing name');
+                        lastResult = 'Preflight action missing "name".';
+                        continue;
+                    }
+
+                    if (!matchedSpecData || !matchedSpecData.spec) {
+                        noteWebPlannerIssue(planState, 'preflight_no_spec', actionName);
+                        lastResult = `Failed: Preflight Designer spec not found/matched for this page.`;
+                        continue;
+                    }
+
+                    const actionObj = matchedSpecData.spec.actions?.[actionName];
+                    if (!actionObj) {
+                        noteWebPlannerIssue(planState, 'preflight_invalid_action', actionName);
+                        lastResult = `Failed: Preflight action "${actionName}" not found in spec.`;
+                        continue;
+                    }
+
+                    const type = actionObj.action_type || actionObj.type || 'browser';
+                    const params = command.params || {};
+
+                    if (type === 'api') {
+                        const apiInfo = actionObj.api;
+                        if (!apiInfo || !apiInfo.url) {
+                            noteWebPlannerIssue(planState, 'preflight_api_missing_config', actionName);
+                            lastResult = `Failed: Preflight api action "${actionName}" lacks api config in spec.`;
+                            continue;
+                        }
+
+                        let url = apiInfo.url;
+                        let method = (apiInfo.method || 'POST').toUpperCase();
+                        let body = {};
+                        
+                        const actionParams = actionObj.parameters || [];
+                        for (const p of actionParams) {
+                            const pName = p.name;
+                            const pVal = params[pName] !== undefined ? params[pName] : '';
+                            if (url.includes(`{${pName}}`)) {
+                                url = url.replace(`{${pName}}`, encodeURIComponent(pVal));
+                            } else if (method === 'GET') {
+                                // Add to query string
+                                const parsedUrl = new URL(url, page.url());
+                                parsedUrl.searchParams.append(pName, String(pVal));
+                                url = parsedUrl.pathname + parsedUrl.search;
+                            } else {
+                                body[pName] = pVal;
+                            }
+                        }
+
+                        // Execute API upgrade via page.evaluate
+                        const result = await page.evaluate(async ({ url, method, body }) => {
+                            try {
+                                const response = await fetch(url, {
+                                    method,
+                                    headers: {
+                                        'Content-Type': 'application/json',
+                                        'Accept': 'application/json'
+                                    },
+                                    body: method !== 'GET' && method !== 'HEAD' ? JSON.stringify(body) : undefined
+                                });
+                                const text = await response.text();
+                                let json = null;
+                                try {
+                                    json = JSON.parse(text);
+                                } catch {}
+                                return {
+                                    ok: response.ok,
+                                    status: response.status,
+                                    statusText: response.statusText,
+                                    body: json || text
+                                };
+                            } catch (e) {
+                                return { error: e.message };
+                            }
+                        }, { url, method, body });
+
+                        if (result.error) {
+                            noteWebPlannerIssue(planState, 'preflight_api_fetch_error', result.error);
+                            lastResult = `Failed API upgrade for "${actionName}": ${result.error}`;
+                            continue;
+                        }
+
+                        noteWebPlannerSuccess(planState, `executed api upgrade: ${actionName}`);
+                        lastResult = `Preflight API Upgrade executed for action "${actionName}". Status: ${result.status} ${result.statusText}. Response: ${JSON.stringify(result.body)}`;
+                        actionHistory.push({ action: 'preflight_api', id: actionName, url: currentUrl });
+                        continue;
+                    } else {
+                        // DOM / browser action
+                        // 1. Fill fields defined in parameters
+                        const actionParams = actionObj.parameters || [];
+                        let fieldsFilled = [];
+                        for (const p of actionParams) {
+                            const pName = p.name;
+                            const pVal = params[pName];
+                            if (pVal !== undefined && p.selector) {
+                                await page.waitForSelector(p.selector, { timeout: 4000 });
+                                await page.fill(p.selector, String(pVal));
+                                fieldsFilled.push(pName);
+                            }
+                        }
+
+                        // 2. Click main selector
+                        if (actionObj.selector) {
+                            await page.waitForSelector(actionObj.selector, { timeout: 4000 });
+                            await page.click(actionObj.selector);
+                            await page.waitForTimeout(600);
+                            noteWebPlannerSuccess(planState, `executed DOM preflight action: ${actionName}`);
+                            lastResult = `Preflight DOM action "${actionName}" executed. Filled fields: ${fieldsFilled.join(', ') || 'none'}. Clicked selector: ${actionObj.selector}`;
+                            actionHistory.push({ action: 'preflight_dom', id: actionName, url: currentUrl });
+                            continue;
+                        }
+
+                        noteWebPlannerSuccess(planState, `executed preflight form inputs: ${actionName}`);
+                        lastResult = `Preflight DOM fields filled for "${actionName}": ${fieldsFilled.join(', ') || 'none'}. No click selector defined.`;
+                        actionHistory.push({ action: 'preflight_dom_fields', id: actionName, url: currentUrl });
+                        continue;
+                    }
+                } catch (e) {
+                    noteWebPlannerIssue(planState, 'preflight_action_exception', e.message);
+                    lastResult = `Preflight action execution exception: ${e.message}`;
+                    continue;
+                }
+            }
+
             if (command.action === 'scroll') {
                 await page.evaluate(() => window.scrollBy(0, window.innerHeight * 0.6));
                 await page.waitForTimeout(1000);
@@ -3969,4 +4479,197 @@ export const __webToolsPreflightTestHooks = {
     scoreTargetCandidate,
     preflightRecommendation
 };
+
+/**
+ * Monitor a webpage for content changes or a specific condition.
+ * Once met, alerts the user and runs an autonomous goal.
+ */
+export async function keep_a_look(args, signal = null) {
+    const { url, condition, action, intervalSeconds = 30, selector, headless = false } = args;
+    if (!url) {
+        return 'Error: keep_a_look requires a "url" parameter.';
+    }
+    const checkIntervalMs = Math.max(5, Number(intervalSeconds) || 30) * 1000;
+
+    const page = await manager.getPage({ headless });
+    const safeUrl = normalizeWebUrl(url);
+
+    console.log(`\n🦖 [Keep-A-Look] Opening initial page: ${safeUrl}...`);
+    const nav = await resilientGoto(page, safeUrl, {
+        timeout: 30000,
+        waitUntilPrimary: 'load',
+        waitUntilFallback: 'domcontentloaded'
+    });
+
+    if (!nav.ok) {
+        return `Error: Failed to open ${safeUrl} during initial load.`;
+    }
+
+    await smartHandleConsentAndOverlays(page, { maxClicks: 2, preferReject: true });
+    await page.waitForTimeout(1000);
+
+    const getPageState = async () => {
+        try {
+            return await page.evaluate((sel) => {
+                let el = document.body;
+                if (sel) {
+                    const target = document.querySelector(sel);
+                    if (target) el = target;
+                }
+                const clone = el.cloneNode(true);
+                clone.querySelectorAll('script, style, noscript, nav, footer, iframe').forEach(s => s.remove());
+                return clone.innerText;
+            }, selector);
+        } catch {
+            return '';
+        }
+    };
+
+    const cleanText = (text) => {
+        if (!text) return '';
+        let clean = text.replace(/\b\d{1,2}:\d{2}(:\d{2})?\s*(am|pm)?\b/gi, '');
+        clean = clean.replace(/\b\d+\b/g, '');
+        clean = clean.replace(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december|mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b/gi, '');
+        return clean.replace(/\s+/g, ' ').trim();
+    };
+
+    const logTextDiff = (prev, curr) => {
+        const prevWords = new Set(prev.split(/\s+/));
+        const currWords = new Set(curr.split(/\s+/));
+
+        const added = [...currWords].filter(w => !prevWords.has(w) && w.length > 2);
+        const removed = [...prevWords].filter(w => !currWords.has(w) && w.length > 2);
+
+        if (added.length > 0) {
+            console.log(`🦖 [Keep-A-Look] Added words: ${added.slice(0, 15).join(', ')}${added.length > 15 ? '...' : ''}`);
+        }
+        if (removed.length > 0) {
+            console.log(`🦖 [Keep-A-Look] Removed words: ${removed.slice(0, 15).join(', ')}${removed.length > 15 ? '...' : ''}`);
+        }
+    };
+
+    let rawPrev = await getPageState();
+    let previousStateClean = cleanText(rawPrev);
+
+    console.log(`🦖 [Keep-A-Look] Initial state captured (${previousStateClean.length} chars).`);
+    console.log(`🦖 [Keep-A-Look] Watching for: ${condition || 'Any content change (diff)'}`);
+    console.log(`🦖 [Keep-A-Look] Interval: ${intervalSeconds}s. Press Ctrl+C to abort.`);
+
+    let checkCount = 0;
+    while (true) {
+        if (signal?.aborted) {
+            return 'Keep-a-look aborted.';
+        }
+
+        // Wait interval
+        await new Promise(resolve => {
+            const timeout = setTimeout(resolve, checkIntervalMs);
+            if (signal) {
+                signal.addEventListener('abort', () => {
+                    clearTimeout(timeout);
+                    resolve();
+                });
+            }
+        });
+        if (signal?.aborted) return 'Keep-a-look aborted.';
+
+        checkCount++;
+        console.log(`\n🦖 [Keep-A-Look] Refreshing page... (Check #${checkCount})`);
+
+        try {
+            await page.reload({ waitUntil: 'domcontentloaded' });
+            await smartHandleConsentAndOverlays(page, { maxClicks: 1, preferReject: true });
+            await page.waitForTimeout(1000);
+        } catch (err) {
+            console.log(`⚠️ Reload failed: ${err.message}. Retrying next interval.`);
+            continue;
+        }
+
+        const rawCurrent = await getPageState();
+        const currentStateClean = cleanText(rawCurrent);
+
+        let triggered = false;
+        let diffReason = '';
+
+        if (condition) {
+            const loweredCondition = condition.toLowerCase();
+            const loweredCurrent = currentStateClean.toLowerCase();
+            const loweredPrev = previousStateClean.toLowerCase();
+
+            if (loweredCondition.includes('tickets') || loweredCondition.includes('out') || loweredCondition.includes('available')) {
+                const releaseKeywords = ['book', 'buy', 'checkout', 'get tickets', 'now open', 'tickets available', 'add to cart', 'select tickets'];
+                const currentHas = releaseKeywords.some(k => loweredCurrent.includes(k));
+                const prevHas = releaseKeywords.some(k => loweredPrev.includes(k));
+                if (currentHas && !prevHas) {
+                    triggered = true;
+                    diffReason = `Ticket booking keywords detected on reload (e.g. "book/buy/tickets").`;
+                }
+            }
+
+            if (!triggered && loweredCurrent.includes(loweredCondition) && !loweredPrev.includes(loweredCondition)) {
+                triggered = true;
+                diffReason = `Target condition text "${condition}" appeared on the page.`;
+            }
+            
+            if (!triggered && currentStateClean !== previousStateClean) {
+                const charDiff = Math.abs(currentStateClean.length - previousStateClean.length);
+                if (charDiff > 20) {
+                    triggered = true;
+                    diffReason = 'Content changed significantly.';
+                }
+            }
+        } else {
+            if (currentStateClean !== previousStateClean) {
+                const charDiff = Math.abs(currentStateClean.length - previousStateClean.length);
+                if (charDiff > 10) {
+                    triggered = true;
+                    diffReason = 'Content changed.';
+                }
+            }
+        }
+
+        if (triggered) {
+            console.log(`\n🚨🚨🚨 [Keep-A-Look] CHANGE DETECTED! 🚨🚨🚨`);
+            console.log(`Reason: ${diffReason}`);
+            logTextDiff(previousStateClean, currentStateClean);
+
+            process.stdout.write('\x07');
+
+            try {
+                const { loadConfig } = await import('./config.js');
+                const cfg = loadConfig();
+                const platform = cfg.discordBotToken ? 'discord' : cfg.slackBotToken ? 'slack' : null;
+                if (platform) {
+                    const { sendNotification } = await import('./connectors.js');
+                    await sendNotification(platform, `🚨 **[Keep-A-Look]** Change detected on ${safeUrl}!\nReason: ${diffReason}\nStarting autonomous goal: "${action || 'Autonomously check out'}"`);
+                }
+            } catch (err) {
+                // ignore
+            }
+
+            const finalGoal = action || `Autonomously complete checkout on current page`;
+            console.log(`🦖 [Keep-A-Look] Handing control to autonomous web agent with goal: "${finalGoal}"`);
+            
+            let agentResult;
+            if (process.env.KEEP_A_LOOK_TEST_MOCK === 'true') {
+                console.log(`[MOCK] Handing control to mock web agent with goal: "${finalGoal}"`);
+                agentResult = 'Mock execution success';
+            } else {
+                agentResult = await run_autonomous_web_agent({
+                    goal: finalGoal,
+                    budgetMode: 'balanced',
+                    maxSteps: 30
+                }, signal);
+            }
+
+            console.log(`\n🦖 [Keep-A-Look] Autonomous agent run finished.`);
+            console.log(agentResult);
+
+            return `Keep-A-Look triggered! Agent output:\n${agentResult}`;
+        }
+
+        previousStateClean = currentStateClean;
+    }
+}
+
 

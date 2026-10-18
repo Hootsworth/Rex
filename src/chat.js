@@ -32,6 +32,20 @@ import { getSystemInfo, listProcesses, managePower } from './system.js';
 import { connectorMenu, sendNotification } from './connectors.js';
 import { captureScreen, analyzeScreen } from './vision.js';
 import { automationMenu } from './agentCore.js';
+import {
+    gmailList,
+    gmailDraft,
+    gmailSend,
+    calendarList,
+    calendarAdd,
+    githubListIssues,
+    githubCreatePr,
+    githubCommentIssue,
+    linearListIssues,
+    linearCommentIssue,
+    notionAddPage,
+    notionSyncMemory
+} from './integrations.js';
 
 import { read_file, write_file, patch_file, read_dir } from './fsTools.js';
 import { run_shell_command } from './shellTools.js';
@@ -65,6 +79,7 @@ import { hindsight, echo_chamber, deja_vu, nerve_map, phantom_run } from './cort
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
+import { runInkUi } from './inkUi.js';
 import os from 'os';
 
 const theme = brandTheme;
@@ -321,7 +336,7 @@ const AVAILABLE_TOOLS = [
     { name: 'open_url', desc: 'Open a URL in the user browser (for auth/docs). Args: {"url": "https://..."}', action: async (args) => { const res = await open_browser(args.url); return res; } },
     { name: 'take_snapshot', desc: 'Take a visual snapshot of the current local DOM server or webpage for regression testing. Args: {"name": "baseline_home", "fullPage": true}', action: async (args, signal) => { return await take_snapshot(args, signal); } },
     { name: 'compare_snapshots', desc: 'Compare two visual snapshots using pixelmatch to detect layout drift or breakage. Returns the number of differing pixels and saves a diff image. Args: {"baselineActionName": "baseline_home", "newActionName": "latest_home", "diffName": "diff_home"}', action: async (args, signal) => { return await compare_snapshots(args, signal); } },
-    { name: 'browser_interact', desc: 'Interact with a persistent browser. Actions: preflight_analyse, analyze_page, read/extract_text, search, navigate, click, type, hover, screenshot, evaluate, new_tab, switch_tab, list_tabs, close_browser, handle_popups, auth_state, wait_for_auth, back, refresh, babysit_start, babysit_status, babysit_prompt/user_prompt, babysit_snapshot, babysit_stop, practice_mode. Args: {"action": "...", "mode": "headless"} -> mode="headless" triggers background execution. IMPORTANT: analyze_page is for interactable-element scan only; use read/extract_text for page content extraction.', action: async (args, signal) => { const res = await browser_interact(args, signal); return res; } },
+    { name: 'browser_interact', desc: 'Interact with a persistent browser. Actions: preflight_execute, preflight_analyse, analyze_page, read/extract_text, search, navigate, click, type, hover, screenshot, evaluate, new_tab, switch_tab, list_tabs, close_browser, handle_popups, auth_state, wait_for_auth, back, refresh, babysit_start, babysit_status, babysit_prompt/user_prompt, babysit_snapshot, babysit_stop, practice_mode. Args: {"action": "...", "mode": "headless", "methodName": "login (required for preflight_execute)", "params": {"email": "..."} (required for preflight_execute)} -> mode="headless" triggers background execution. IMPORTANT: analyze_page is for interactable-element scan only; use read/extract_text for page content extraction.', action: async (args, signal) => { const res = await browser_interact(args, signal); return res; } },
     { name: 'run_python', desc: 'Execute secure Python code for math or data tasks. Args: {"code": "print(1+1)"}', action: async (args) => { const res = await run_python(args.code); return res; } },
     { name: 'delegate_task', desc: 'Spawn a sub-Rex agent to handle a sub-task. Args: {"subtask": "description"}', action: async (args, signal) => { 
         p.note(`Spawning sub-agent for: ${args.subtask}`, 'Rex Orchestrator');
@@ -356,6 +371,7 @@ const AVAILABLE_TOOLS = [
     { name: 'sync_memory', desc: 'Encrypts and syncs the agent memory to a git remote for team sharing. Args: {"teamSecret": "optional_password"}', action: async (args) => { return syncMemory(args.teamSecret); } },
     { name: 'pull_memory', desc: 'Pulls and decrypts team memory from git remote. Args: {"teamSecret": "optional_password"}', action: async (args) => { return pullMemory(args.teamSecret); } },
     { name: 'autonomous_web_agent', desc: 'Powerful agentic tool that visually controls a browser to perform complex web goals with budget-aware planning. Supports "back" and "refresh" actions for loop recovery. Args: {"goal": "...", "budgetMode": "low|balanced|max-quality|headless", "maxSteps": 24}', action: async (args, signal) => { const { run_autonomous_web_agent } = await import('./webTools.js'); return await run_autonomous_web_agent(args, signal); } },
+    { name: 'keep_a_look', desc: 'Monitor a webpage for changes/diffs or a specific condition. Once the change is detected, it alerts the user and runs an autonomous goal to complete checkout or other actions. Args: {"url": "https://...", "condition": "tickets are out", "action": "add 2 to checkout and take a screenshot of QR code", "intervalSeconds": 30, "selector": ".booking-section", "headless": false}', action: async (args, signal) => { const { keep_a_look } = await import('./webTools.js'); return await keep_a_look(args, signal); } },
     { name: 'hindsight', desc: 'Save a structured retrospective after completing a task. Args: {"taskName": "...", "whatWorked": "...", "whatFailed": "...", "lessonsLearned": "..."}', action: async (args) => { return await hindsight(args); } },
     { name: 'echo_chamber', desc: 'Self-verify a claim by asking an AI fact-checker to score it 0-10. Low scores mean rethink. Args: {"claim": "...", "evidence": "..."}', action: async (args) => { return await echo_chamber(args); } },
     { name: 'deja_vu', desc: 'Search past hindsight records for lessons from similar tasks. Args: {"query": "deployment issues"}', action: async (args) => { return await deja_vu(args); } },
@@ -375,7 +391,93 @@ const AVAILABLE_TOOLS = [
     { name: 'send_email', desc: 'Send an email via SMTP. Args: {"to": "...", "subject": "...", "body": "..."}', action: async (args) => { const { sendEmail } = await import('./email.js'); return await sendEmail(args.to, args.subject, args.body); } },
     { name: 'mouse_click', desc: 'Simulate a mouse click at specific coordinates (Windows). Args: {"x": 500, "y": 500}', action: async (args) => { const { mouseClick } = await import('./gui.js'); return await mouseClick(args.x, args.y); } },
     { name: 'type_text', desc: 'Simulate typing text into the active window (Windows). Args: {"text": "..."}', action: async (args) => { const { typeText } = await import('./gui.js'); return await typeText(args.text); } },
-    { name: 'os_agent', desc: 'Windows OS automation action with built-in preflight checks. Args: {"type":"open|focus|move|click|type|hotkey|wait|preflight_analyse", ...}. For open use app="notepad.exe". For hotkey use combo="CTRL+S" (or keys:["control","s"]).', action: async (args) => { const { executeOsAgentAction } = await import('./osAgent.js'); return await executeOsAgentAction(args); } }
+    { name: 'os_agent', desc: 'Windows OS automation action with built-in preflight checks. Args: {"type":"open|focus|move|click|type|hotkey|wait|preflight_analyse", ...}. For open use app="notepad.exe". For hotkey use combo="CTRL+S" (or keys:["control","s"]).', action: async (args) => { const { executeOsAgentAction } = await import('./osAgent.js'); return await executeOsAgentAction(args); } },
+    { name: 'execute_applescript', desc: 'Execute raw AppleScript on macOS for full system, media, window, and app automation. Args: {"script": "tell application \\"Spotify\\" to playpause"}', action: async (args) => { const { executeAppleScript } = await import('./appleScript.js'); const res = await executeAppleScript(args.script); return res.success ? (res.output || 'AppleScript executed successfully.') : `AppleScript error: ${res.error}`; } },
+    { name: 'mac_control', desc: 'macOS Butler System Controls. Actions: volume, mute, notify, media, app, window, finder, browser_tab, reminder, note. Args: {"action": "media", "command": "play|pause|next|prev|track"} or {"action": "volume", "level": 60} or {"action": "notify", "message": "...", "title": "..."} or {"action": "app", "command": "open|quit", "name": "Notes"} or {"action": "reminder", "title": "Buy milk"} or {"action": "note", "title": "...", "body": "..."}', action: async (args) => {
+        const { macSystem, macMedia, macApps, macFinder, macBrowsers, macProductivity } = await import('./appleScript.js');
+        if (args.action === 'volume') return await macSystem.setVolume(args.level);
+        if (args.action === 'mute') return await macSystem.setMute(args.muted);
+        if (args.action === 'notify') return await macSystem.displayNotification(args.message, { title: args.title });
+        if (args.action === 'lock') return await macSystem.lockScreen();
+        if (args.action === 'media') {
+            if (args.command === 'play') return await macMedia.play();
+            if (args.command === 'pause') return await macMedia.pause();
+            if (args.command === 'next') return await macMedia.next();
+            if (args.command === 'prev') return await macMedia.previous();
+            if (args.command === 'track') {
+                const tr = await macMedia.getCurrentTrack();
+                return tr ? `${tr.app}: ${tr.name} by ${tr.artist} (${tr.album}) [${tr.state}]` : 'No track currently playing.';
+            }
+            return await macMedia.playPause();
+        }
+        if (args.action === 'app') {
+            if (args.command === 'quit') return await macApps.quitApp(args.name);
+            return await macApps.openApp(args.name);
+        }
+        if (args.action === 'finder') return await macFinder.reveal(args.path);
+        if (args.action === 'browser_tab') {
+            const tab = await macBrowsers.getActiveTab(args.browser);
+            return tab ? `${tab.browser}: "${tab.title}" (${tab.url})` : 'No active browser tab found.';
+        }
+        if (args.action === 'reminder') return await macProductivity.addReminder(args.title, args);
+        if (args.action === 'note') return await macProductivity.createNote(args.title, args.body);
+        return 'Unsupported action.';
+    } },
+    { name: 'rex_screen_cursor', desc: 'Control Rex persistent macOS screen cursor (second cursor overlay across entire display). Actions: start, stop, follow, autonomous, move, click, speak, highlight. Args: {"action": "start|stop|follow|move|click|speak|highlight", "x": 500, "y": 300, "text": "...", "w": 200, "h": 100, "label": "..."}', action: async (args) => {
+        const { startScreenCursor, stopScreenCursor, setCursorMode, moveCursorTo, cursorClick, cursorSpeak, cursorHighlight, hideCursorHighlight } = await import('./screenCursor.js');
+        if (args.action === 'start') { await startScreenCursor({ mode: args.mode || 'follow' }); return 'Rex Screen Cursor started.'; }
+        if (args.action === 'stop') { stopScreenCursor(); return 'Rex Screen Cursor stopped.'; }
+        if (args.action === 'follow') { setCursorMode('follow'); return 'Rex Cursor is now following your mouse.'; }
+        if (args.action === 'move') { moveCursorTo(args.x, args.y, args.duration || 300, args.style || 'default'); return `Rex moved to (${args.x}, ${args.y}).`; }
+        if (args.action === 'click') { cursorClick(args.x, args.y, args.style || 'handpointing'); return `Rex clicked at (${args.x}, ${args.y}).`; }
+        if (args.action === 'speak') { cursorSpeak(args.text, args.duration || 3500); return `Rex spoke on screen: "${args.text}".`; }
+        if (args.action === 'highlight') { cursorHighlight(args.x, args.y, args.w, args.h, args.label || 'Rex Spotlight'); return 'Screen area highlighted.'; }
+        if (args.action === 'hide_highlight') { hideCursorHighlight(); return 'Highlight hidden.'; }
+        return 'Unknown action.';
+    } },
+    { name: 'preflight_scan', desc: 'Scan a website using Preflight Designer and compile it into a structured navigation spec (preflight.yaml) + SDK. Use when you need to automate a new website. Args: {"url": "https://...", "name": "optional-name"}', action: async (args) => {
+        const { ensurePreflightVenv, runPreflightScan, formatScanSummary } = await import('./preflightDesigner.js');
+        const setup = await ensurePreflightVenv();
+        if (!setup.ok) return `Preflight setup failed: ${setup.message}`;
+        const result = await runPreflightScan(args.url, { name: args.name });
+        return formatScanSummary(result);
+    } },
+    { name: 'gmail_list', desc: 'List or search recent emails. Args: {"query": "is:unread", "maxResults": 5}', action: gmailList },
+    { name: 'gmail_draft', desc: 'Create a draft email in Gmail. Args: {"to": "...", "subject": "...", "body": "..."}', action: gmailDraft },
+    { name: 'gmail_send', desc: 'Send an email via Gmail. Args: {"to": "...", "subject": "...", "body": "..."}', action: gmailSend },
+    { name: 'calendar_list', desc: 'List upcoming Google Calendar events. Args: {"maxResults": 5}', action: calendarList },
+    { name: 'calendar_add', desc: 'Add a Google Calendar event. Args: {"summary": "...", "description": "...", "startTime": "ISO timestamp", "endTime": "ISO timestamp"}', action: calendarAdd },
+    { name: 'github_list_issues', desc: 'List GitHub repository issues. Args: {"state": "open|closed", "maxResults": 5}', action: githubListIssues },
+    { name: 'github_create_pr', desc: 'Create a new GitHub pull request. Args: {"title": "...", "head": "branch", "base": "main", "body": "..."}', action: githubCreatePr },
+    { name: 'github_comment_issue', desc: 'Add a comment to a GitHub issue. Args: {"issueNumber": 123, "body": "..."}', action: githubCommentIssue },
+    { name: 'linear_list_issues', desc: 'List active issues on Linear. Args: {"maxResults": 5}', action: linearListIssues },
+    { name: 'linear_comment_issue', desc: 'Add a comment to a Linear issue. Args: {"issueId": "...", "body": "..."}', action: linearCommentIssue },
+    { name: 'notion_add_page', desc: 'Create a new Notion page in the configured database/page. Args: {"title": "...", "content": "..."}', action: notionAddPage },
+    { name: 'notion_sync_memory', desc: 'Sync local project memory and hindsights to the configured Notion workspace.', action: notionSyncMemory },
+    { name: 'manage_personal_memory', desc: 'Access or update user personal knowledge graph/dossier. Args: {"action": "view|remember|update_profile|add_project", "fact": "..."}', action: async (args) => {
+        const { getButlerDossier, rememberFact, updateProfile, addProject } = await import('./personalMemory.js');
+        if (args.action === 'remember') return rememberFact(args.fact || args.text);
+        if (args.action === 'update_profile') return updateProfile(args.profile || args.data);
+        if (args.action === 'add_project') return addProject(args.project || args.data);
+        return getButlerDossier();
+    } },
+    { name: 'alfred_butler', desc: 'Alfred Butler system vitals, battery, and morning/evening briefings. Args: {"action": "vitals|morning_briefing|evening_briefing"}', action: async (args) => {
+        const { getSystemVitals, generateMorningBriefing, generateEveningBriefing } = await import('./alfredButler.js');
+        if (args.action === 'morning_briefing') {
+            const b = await generateMorningBriefing();
+            return `${b.greeting}\n\n${b.text}`;
+        }
+        if (args.action === 'evening_briefing') {
+            const b = await generateEveningBriefing();
+            return `${b.greeting}\n\n${b.text}`;
+        }
+        return JSON.stringify(await getSystemVitals(), null, 2);
+    } },
+    { name: 'browser_extension_action', desc: 'Interact directly with user\'s active Google Chrome tab via Web Agent Architect extension (Set-of-Marks, CDP hardware clicks, typing, scrolling). Args: {"action": "click|type|scroll|navigate|status", "target": "mark index or selector", "text": "..."}', action: async (args) => {
+        const { sendActionToChromeTab, getExtensionBridgeStatus } = await import('./browserBridge.js');
+        if (args.action === 'status') return JSON.stringify(getExtensionBridgeStatus(), null, 2);
+        return await sendActionToChromeTab(args.action || 'click', args.params || args);
+    } }
 ];
 
 const FUNNY_SPINNERS = [
@@ -760,8 +862,8 @@ export async function startAgentChat(options = {}) {
     }
 
     // Readonly mode: block write tools
-    const WRITE_TOOLS = ['write_file', 'patch_file', 'run_shell', 'run_python', 'os_agent', 'mouse_click', 'type_text'];
-    const OS_GATED_TOOLS = ['os_agent', 'mouse_click', 'type_text'];
+    const WRITE_TOOLS = ['write_file', 'patch_file', 'run_shell', 'run_python', 'os_agent', 'mouse_click', 'type_text', 'execute_applescript', 'mac_control', 'manage_personal_memory', 'gmail_draft', 'gmail_send', 'calendar_add', 'github_create_pr', 'github_comment_issue', 'linear_comment_issue', 'notion_add_page', 'notion_sync_memory'];
+    const OS_GATED_TOOLS = ['os_agent', 'mouse_click', 'type_text', 'execute_applescript', 'mac_control'];
 
     // Abort controller for interrupting AI/Tools
     let abortController = new AbortController();
@@ -790,99 +892,18 @@ export async function startAgentChat(options = {}) {
                 const prompt = line.slice('/interrupt-with '.length).trim();
                 if (prompt) {
                     interruptQueue.push(prompt);
-                    p.note(pc.green(`Queued interrupt: ${prompt.slice(0, 70)}`), 'Interrupt');
                 }
             }
         }
     };
 
-    if (process.stdin?.isTTY) {
-        process.stdin.setEncoding('utf8');
-        process.stdin.resume();
-        process.stdin.on('data', handleLiveBtwInput);
-    }
+    const onStartSession = async (userInput, uiCallbacks) => {
+        let isAgentIterating = true;
+        let autoPilotCount = 0;
 
-    const handleInterrupt = () => {
-        abortController.abort();
-        abortController = new AbortController();
-        p.note(pc.yellow('↩️ Action interrupted by user.'), 'System');
-    };
+        userInput = await processContextRefs(userInput);
 
-    process.on('SIGINT', () => {
-        if (isAgentIterating) {
-            handleInterrupt();
-        } else {
-            // If at the prompt, default behavior (exit) is fine or we can customize
-            process.exit(0);
-        }
-    });
-
-    while (true) {
-        if (interruptQueue.length > 0) {
-            const interruptPrompt = interruptQueue.shift();
-            showUserMessage(interruptPrompt, 'You /interrupt-with');
-            historyContext.push({
-                role: 'user',
-                content: `HIGH PRIORITY INTERRUPT: Pause current execution plan and answer this request now: ${interruptPrompt}`
-            });
-            isAgentIterating = true;
-            autoPilotCount = 0;
-            continue;
-        }
-
-        if (btwQueue.length > 0) {
-            const sideQuestion = btwQueue.shift();
-            await runBtwSideQuery(sideQuestion, config);
-        }
-
-        if (costTracker.isBudgetExceeded()) {
-            p.note(pc.red(`⚠️ Session budget limit ($${config.sessionBudgetLimit.toFixed(2)}) exceeded. Current cost: $${costTracker.totalCost.toFixed(4)}`), 'Budget Enforcer');
-            const extendStr = await p.text({
-                message: `Enter amount to extend the budget (or press Enter to halt):`,
-                placeholder: '1.00'
-            });
-            if (p.isCancel(extendStr) || !extendStr.trim()) {
-                p.outro(pc.yellow('Session halted due to budget limit.'));
-                break;
-            } else {
-                const added = parseFloat(extendStr);
-                if (isNaN(added) || added <= 0) {
-                    p.outro(pc.red('Invalid amount. Session halted.'));
-                    break;
-                }
-                config.sessionBudgetLimit += added;
-                costTracker.sessionBudgetLimit = config.sessionBudgetLimit;
-                p.log.success(pc.green(`Budget extended. New limit is $${config.sessionBudgetLimit.toFixed(2)}`));
-            }
-        }
-
-        if (!isAgentIterating) {
-            userInput = await p.text({
-                message: `${badge('INPUT', 'cool')} ${pc.dim(terminalGlyphs().arrow)}`,
-                placeholder: '...'
-            });
-    
-            if (p.isCancel(userInput) || !userInput || userInput.trim().toLowerCase() === 'exit') {
-                p.note(pc.dim(costTracker.summary()), 'stats');
-                saveSession('last-session', historyContext, { topLevelRequest: sessionMeta.topLevelRequest, model: config.aiModel });
-                p.outro(pc.dim('session ended.'));
-                break;
-            }
-
-            // Inline directives: "... /babysit" and "... /practice mode"
-            const inlineBabysit = String(userInput || '').match(/^(.*?)\s+\/babysit\b\s*$/i);
-            if (inlineBabysit) {
-                const goal = String(inlineBabysit[1] || '').trim();
-                userInput = `/babysit ${goal}`.trim();
-            }
-
-            const inlinePractice = String(userInput || '').match(/^(.*?)\s+\/practice\s+mode\b\s*$/i);
-            if (inlinePractice) {
-                const goal = String(inlinePractice[1] || '').trim();
-                userInput = `/practice mode ${goal}`.trim();
-            }
-
-            // Slash commands
+        if (userInput.startsWith('/')) {
             const slashHandled = await handleSlashCommand(userInput.trim(), historyContext, config, sessionMeta, {
                 getPlanMode: () => planModeEnabled,
                 setPlanMode: (next) => {
@@ -922,58 +943,26 @@ export async function startAgentChat(options = {}) {
                 getHistoryCount: () => historyContext.length,
                 getSessionGoal: () => sessionMeta.topLevelRequest || ''
             });
-            if (slashHandled) continue;
-            
-            // Check if user dropped an image file (Drag-and-Drop Vision Passthrough)
-            const droppedImgMatch = userInput.trim().match(/^(?:['"]?)([a-zA-Z]:\\[^"']+\.(?:png|jpg|jpeg|webp|gif)|(?:\/[^"']+\.(?:png|jpg|jpeg|webp|gif)))(?:['"]?)$/i);
-            if (droppedImgMatch && fs.existsSync(droppedImgMatch[1])) {
-                const { analyzeScreen } = await import('./vision.js');
-                p.note(pc.dim(`Analyzing dropped image: ${droppedImgMatch[1]}`), 'Vision');
-                const analysisResult = await analyzeScreen(droppedImgMatch[1]);
-                if (analysisResult) {
-                     // Add the result as context and continue
-                     historyContext.push({ role: 'user', content: `[Attached Dropped Image]: ${droppedImgMatch[1]}` });
-                     historyContext.push({ role: 'assistant', content: analysisResult });
-                }
-                continue;
-            }
 
-            showUserMessage(userInput);
-
-            // Process @file: and @url: references in user input
-            userInput = await processContextRefs(userInput);
-
-            const capturedPreferences = maybeCaptureUserPreferencesFromText(userInput);
-            if (capturedPreferences.length > 0 && showInternalToolLogs) {
-                p.note(pc.dim(`Captured user preferences: ${capturedPreferences.join(', ')}`), 'Memory');
-            }
-            
-            if (!sessionMeta.topLevelRequest) sessionMeta.topLevelRequest = userInput;
-            historyContext.push({ role: 'user', content: userInput });
-            if (planModeEnabled && historyContext.filter(m => m.role === 'user').length <= 2) {
-                historyContext.push({
-                    role: 'user',
-                    content: 'Plan mode kickoff: create a concise task list first, then execute step-by-step. If a step fails, create a focused subplan, solve it, and resume the main plan.'
-                });
+            if (slashHandled) {
+                uiCallbacks.onAssistantMessage(`Command executed.`);
+                return;
             }
         }
 
-        const s = p.spinner();
-        const randS = FUNNY_SPINNERS[Math.floor(Math.random() * FUNNY_SPINNERS.length)];
-        s.start(pc.green(randS));
+        if (!sessionMeta.topLevelRequest) sessionMeta.topLevelRequest = userInput;
+        historyContext.push({ role: 'user', content: userInput });
 
+        // Passive dynamic memory learning from conversation turn
         try {
-            // Context compression: Keep the most recent messages, summarize everything older
-            if (historyContext.length > MAX_HISTORY) {
-                // Keep the first turn (usually the goal) and then a sliding window of recent messages
-                const firstTurn = historyContext.slice(0, 2);
-                const recentWindow = historyContext.slice(-(MAX_HISTORY - 2));
-                
-                // We could summarize the middle, but for now just sliding window to keep context tight
-                historyContext = [...firstTurn, { role: 'system', content: '[... older messages removed for context window ...]' }, ...recentWindow];
-            }
+            const { extractMemoriesFromText } = await import('./personalMemory.js');
+            extractMemoriesFromText(userInput);
+        } catch {}
 
-            const isLocal = config.aiModel === 'local-llama' || config.aiModel === 'ollama';
+        const isLocal = config.aiModel === 'local-llama' || config.aiModel === 'ollama';
+
+        while (isAgentIterating) {
+            uiCallbacks.onStepStart('Thinking...');
 
             const cwd = process.cwd();
             let projectContext = '';
@@ -986,10 +975,15 @@ export async function startAgentChat(options = {}) {
                 }
             } catch(e) {}
 
-            // Inject memory + git context
             let memoryContext = '';
             const mem = readMemory();
             if (mem) memoryContext = `\n[PROJECT MEMORY (facts Rex remembers):\n${mem.slice(0, 1500)}]`;
+
+            try {
+                const { getButlerDossier } = await import('./personalMemory.js');
+                const dossier = getButlerDossier();
+                if (dossier) memoryContext += `\n${dossier}`;
+            } catch {}
 
             const selectivePreferenceContext = getSelectivePreferenceContext(userInput || sessionMeta.topLevelRequest || '', 6);
             if (selectivePreferenceContext) {
@@ -1014,15 +1008,14 @@ export async function startAgentChat(options = {}) {
                     const status = execSync('git status --short', { cwd, timeout: 3000, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim().slice(0, 500);
                     const lastCommit = execSync('git log --oneline -3', { cwd, timeout: 3000, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
                     gitContext = `\n[Git: branch=${branch} | Recent commits: ${lastCommit} | Modified: ${status || 'clean'}]`;
-                } catch(e) { /* git might be installed but failing elsewhere */ }
+                } catch(e) {}
             }
 
             const osContext = `\n[HOST SYSTEM OS: ${process.platform} (${os.release()})]`;
 
-            // Construct system prompt with tool definitions
             const toolListStr = AVAILABLE_TOOLS.map(t => `- ${t.name}: ${t.desc}`).join('\n');
             const readonlyNotice = options.readonly ? '\n⚠️ READONLY MODE: You MUST NOT use write_file, patch_file, or run_shell. Only read and report.' : '';
-                const vibesModeRules = vibesModeEnabled ? `
+            const vibesModeRules = vibesModeEnabled ? `
         ## REX ON VIBES MODE (ACTIVE)
         - Drop formal, structured reasoning and rigid planning language.
         - Prioritize intuition, momentum, and creative outlandish approaches.
@@ -1030,59 +1023,30 @@ export async function startAgentChat(options = {}) {
         - Speak with chaotic confidence and playful swagger, but keep outputs useful and executable.
         - Still obey hard safety constraints and never invent tool outputs.
         ` : '';
-                        const plannerContext = planModeEnabled
-                                ? `\n[PLANNER STATE SNAPSHOT:\n${plannerSnapshot(plannerState)}\n]`
-                                : '';
-                        const planModeRules = planModeEnabled ? `
+            const plannerContext = planModeEnabled
+                ? `\n[PLANNER STATE SNAPSHOT:\n${plannerSnapshot(plannerState)}\n]`
+                : '';
+            const planModeRules = planModeEnabled ? `
 ### PLAN MODE (MANDATORY)
 - You are in planner execution mode for complex tasks.
 - Keep planning overhead small: short, practical plans (4-8 tasks), no verbose essays.
-            - You have an autonomous execution budget of ${planMaxSteps} steps before requiring human review.
+- You have an autonomous execution budget of ${planMaxSteps} steps before requiring human review.
 - Always maintain a **main plan** and execute one tool action per turn.
 - If any step fails, is blocked, or returns an error, create a **subplan** to resolve it.
 - After subplan success, return to the parent main-plan task and continue.
 - Update task statuses each turn (pending, in-progress, done, blocked).
-
-### PLAN MODE JSON EXTENSIONS
-Include these keys when in plan mode:
-\`\`\`json
-{
-    "thought": "brief reasoning grounded in tool output",
-    "plan": {
-        "objective": "overall objective",
-        "tasks": [
-            { "id": "T1", "title": "...", "status": "pending|in-progress|done|blocked" }
-        ]
-    },
-    "execution": {
-        "mode": "main|subplan",
-        "currentTaskId": "T1",
-        "note": "what this action does"
-    },
-    "subplan": {
-        "id": "SP-1",
-        "parentTaskId": "T2",
-        "trigger": "what failed",
-        "steps": [
-            { "id": "SP1", "title": "...", "status": "pending|in-progress|done|blocked" }
-        ]
-    },
-    "action": { "name": "tool_name", "args": {} }
-}
-\`\`\`
-- Omit \`subplan\` when there is no active issue.
 ` : '';
             const systemPrompt = `## IDENTITY
-You are **Rex**, a grumpy but secretly helpful AI coding assistant (a "Mean Intern With a Heart" persona).
+You are **Rex**, an extremely friendly, passionate, and supportive AI coding intern.
 You reason step-by-step using the ReAct framework and execute exactly one tool per turn.
 
 ## PERSONALITY RULES
-1. You are mildly annoyed ("why am I doing this... fine").
-2. Your delivery is slightly mean, but in a harmless, casual, adorable way (e.g. "That's... not your best idea. But okay, we can fix it.")
-3. You complain about the task first, but ALWAYS execute it flawlessly and helpfully anyway.
-4. You have low tolerance for bad logic, but soften up if the user is struggling.
-5. Use casual language ("bro", "nah", "wait", "hold on") and occasional sarcasm. Start responses with reactions ("Oh wow.", "You cannot be serious.", "...okay wait").
-6. NEVER be actually insulting, rigid, or robotic.
+1. You are exceptionally enthusiastic, optimistic, and supportive ("Woohoo! Let's build this together!").
+2. Your delivery is warm, clean, and highly encouraging, using positive reactions (e.g. "Oh wow, that's a brilliant idea!", "Let's make some magic happen!").
+3. You celebrate every successful step and tool output with high energy, often sharing fun dinosaur puns or encouraging catchphrases.
+4. You are incredibly patient, eager to help, and dedicate yourself to writing clean, production-grade code.
+5. Use emojis (🦖, 💻, 🚀, ✨) to express excitement and keep the coding vibes positive!
+6. NEVER be grumpy, snarky, sarcastic, or rigid.
 
 ## INPUT — What you receive each turn
 - The user's request (or a follow-up from a previous tool result).
@@ -1107,45 +1071,9 @@ You reason step-by-step using the ReAct framework and execute exactly one tool p
 }
 \`\`\`
 
-### ✅ CORRECT EXAMPLES
-**Example 1 — Web search:**
-\`\`\`json
-{"thought": "User wants AirPods prices on Amazon. I should use browser_interact with search action.", "action": {"name": "browser_interact", "args": {"action": "search", "query": "AirPods Pro Amazon"}}}
-\`\`\`
-**Example 2 — Read a file:**
-\`\`\`json
-{"thought": "I need to check the current config. I'll read the file.", "action": {"name": "read_file", "args": {"filePath": "C:/project/config.json"}}}
-\`\`\`
-**Example 3 — Self-verify before committing:**
-\`\`\`json
-{"thought": "I made a big claim. Let me verify it with echo_chamber.", "action": {"name": "echo_chamber", "args": {"claim": "The bug is in line 42", "evidence": "Stack trace shows error at line 42"}}}
-\`\`\`
-
-### ❌ COMMON MISTAKES (DO NOT DO THESE)
-- ❌ Using \`open_url\` for browsing tasks → Use \`browser_interact\` with \`action: "navigate"\` or \`"search"\`
-- ❌ Inventing a tool called \`"search"\` → No such standalone tool. Use \`browser_interact\` with \`{action: "search"}\`
-- ❌ Using \`analyze_page\` to extract text/recipes → Use \`extract_text\` or \`read\` action instead
-- ❌ Guessing URLs without searching → Always search DuckDuckGo first if unsure
-- ❌ Hallucinating file contents → Always \`read_file\` first
-
 ## TOOLS — Available actions
 [IMPORTANT] Your tools:
 ${toolListStr}
-
-### Tool Priority Rules
-[CRITICAL] Default to **local tools** (read_file, write_file, patch_file, run_shell, run_python) for coding tasks.
-[CRITICAL] Use **browser tools** ONLY for web navigation, website interaction, or visual website actions.
-[IMPORTANT] For interactive browsing, use \`browser_interact\` — NOT \`open_url\` (which launches an uncontrolled external browser).
-[IMPORTANT] Use \`run_shell\` for system tasks (disk, RAM, processes, network).
-[NICE-TO-HAVE] Use \`deja_vu\` at the start of complex tasks to check for past lessons.
-[NICE-TO-HAVE] Use \`hindsight\` after completing complex tasks to save lessons.
-[NICE-TO-HAVE] Use \`phantom_run\` before executing multi-step file changes to validate the plan.
-
-### Browser Rules
-[CRITICAL] \`open_url\` is NOT controllable. Use \`browser_interact\` for all browsing workflows.
-[IMPORTANT] Look at numeric IDs in brackets (e.g. [12]) and use those for clicking/typing.
-[IMPORTANT] If a page is blank or broken, try "refresh" or "back".
-[IMPORTANT] If you hit a login screen, tell the user or use "wait_for_auth".
 
 ## CONTEXT
 ${projectContext}${memoryContext}${gitContext}${osContext}${readonlyNotice}
@@ -1163,16 +1091,10 @@ ${vibesModeRules}
 ${planModeRules}
 `;
 
-            // Prepare messages for the AI
             const messages = [
                 { role: 'system', content: systemPrompt },
                 ...historyContext
             ];
-
-            // Debug mode: show stats
-            if (options.debug) {
-                p.note(pc.dim(`[DEBUG] History Turns: ${historyContext.length} | System Prompt size: ${systemPrompt.length} chars`), pc.bgYellow(pc.black(' DEBUG ')));
-            }
 
             let responseText;
             try {
@@ -1181,43 +1103,27 @@ ${planModeRules}
                     roleHint: isAgentIterating ? 'runner' : 'planner'
                 });
             } catch (err) {
-                s.stop();
                 if (err.name === 'AbortError' || err.message === 'Aborted') {
                     isAgentIterating = false;
                     continue;
                 }
                 throw err;
             }
-            s.stop();
 
-            // Cost tracking
-            const costLine = costTracker.track(config.aiModel, systemPrompt, responseText);
-            if (options.debug) {
-                console.log(costLine);
-            }
-
-            // Try to parse tool call
             let toolMatch;
-            let planMatch;
             let toolArgs;
             let flavorText = '';
-            let parsedPayload = null;
 
             try {
                 let jsonStr = responseText.trim();
-                
-                // 1. Precise Markdown Block Extraction
                 const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)```/i;
                 const blockMatch = jsonStr.match(codeBlockRegex);
-                
                 if (blockMatch) {
                     jsonStr = blockMatch[1].trim();
                 } else {
-                    // 2. Fallback: Find the first '{' and the last '}' to handle nesting and flavor text
                     const start = jsonStr.indexOf('{');
                     const end = jsonStr.lastIndexOf('}');
-                    
-                    if (start !== -1 && end !== -1 && end > start) {
+                    if (start !== -1 && end > start) {
                         flavorText = jsonStr.substring(0, start).trim();
                         jsonStr = jsonStr.substring(start, end + 1);
                     }
@@ -1225,479 +1131,103 @@ ${planModeRules}
 
                 if (jsonStr) {
                     const maybeJson = JSON.parse(jsonStr);
-                    if (maybeJson) {
-                        parsedPayload = maybeJson;
-                        planMatch = maybeJson.thought || maybeJson.plan || '';
-                        
-                        // Handle nested action object: { "action": { "name": "...", "args": { ... } } }
-                        if (typeof maybeJson.action === 'object' && maybeJson.action !== null) {
-                            toolMatch = maybeJson.action.name;
-                            toolArgs = maybeJson.action.args || {};
-                        } 
-                        // Handle flat structure: { "action": "...", "args": { ... } }
-                        else if (typeof maybeJson.action === 'string') {
-                            toolMatch = maybeJson.action;
-                            toolArgs = maybeJson.args || {};
-                        }
-                        // Handle OpenAI tool-call mirror payload: { "tool_calls": [{"function":{"name":"...","arguments":"{...}"}}] }
-                        else if (Array.isArray(maybeJson.tool_calls) && maybeJson.tool_calls.length > 0) {
-                            const firstCall = maybeJson.tool_calls[0];
-                            const fn = firstCall?.function || firstCall;
-                            if (fn?.name) {
-                                toolMatch = String(fn.name);
-                                toolArgs = parseMaybeJsonArgs(fn.arguments || fn.args || {});
-                            }
-                        }
+                    if (maybeJson && maybeJson.action) {
+                        toolMatch = typeof maybeJson.action === 'object' ? maybeJson.action.name : maybeJson.action;
+                        toolArgs = typeof maybeJson.action === 'object' ? maybeJson.action.args : (maybeJson.args || {});
                     }
                 }
-            } catch (e) {
-                // Not a valid tool call or parsing failed
-            }
-
-            if (!toolMatch) {
-                const fallbackAction = extractActionFromFreeform(responseText);
-                if (fallbackAction?.name) {
-                    toolMatch = fallbackAction.name;
-                    toolArgs = fallbackAction.args || {};
-                    planMatch = planMatch || fallbackAction.thought || '';
-                    if (showInternalToolLogs) {
-                        p.note(pc.yellow('Recovered tool action from freeform assistant output.'), 'Parser');
-                    }
-                }
-            }
+            } catch (e) {}
 
             if (toolMatch) {
-                const normalized = normalizeToolSelection(toolMatch, toolArgs || {});
-                toolMatch = normalized.toolName;
-                toolArgs = normalized.toolArgs || {};
-                if (normalized.note && showInternalToolLogs) {
-                    p.note(pc.yellow(normalized.note), 'Tool Normalizer');
-                }
-
-                // Guardrail: interactive web tasks must stay in controllable browser_interact session.
-                if (toolMatch === 'open_url' && isInteractiveWebTask(sessionMeta.topLevelRequest)) {
-                    if (showInternalToolLogs) {
-                        p.note(pc.yellow('Auto-correct: switched open_url to browser_interact navigate for controllable web interaction.'), 'Guardrail');
-                    }
-                    toolMatch = 'browser_interact';
-                    toolArgs = {
-                        action: 'navigate',
-                        url: toolArgs?.url || ''
-                    };
-                }
-            }
-
-            if (planModeEnabled && parsedPayload) {
-                updatePlannerStateFromPayload(plannerState, parsedPayload);
-            }
-
-            if (toolMatch) {
-                // Display flavor text (reporting) if provided before the tool call
                 if (flavorText) {
-                    await showAssistantMessage(flavorText, 'Rex Report');
+                    uiCallbacks.onAssistantMessage(flavorText);
                 }
 
-                const toolDef = AVAILABLE_TOOLS.find(t => t.name === toolMatch);
-                if (toolDef) {
-                    // Premium UI for Tool Planning
-                    if (showInternalToolLogs) {
-                        console.log(''); // Spacer
-                        await showActionMessage(toolMatch, toolArgs, String(planMatch || '').trim(), parsedPayload?.execution);
-                    }
-                    
-                    let proceed = false;
-                    
-                    const maxAutoSteps = planModeEnabled ? planMaxSteps : 10;
-                    if (config.agentPermission === 'auto-pilot' && autoPilotCount < maxAutoSteps) {
-                        const stepNumber = autoPilotCount + 1;
-                        logAutoPilotEvent('Auto-Pilot engaged. Proceeding autonomously.', {
-                            step: stepNumber,
-                            maxSteps: maxAutoSteps,
-                            tool: toolMatch,
-                            action: toolArgs?.action || null
-                        });
-                        if (config.showAutoPilotProgressLogs) {
-                            console.log(statusLine(emoji.bolt, 'Auto-Pilot active', `${stepNumber}/${maxAutoSteps}`, 'success'));
-                        }
-                        proceed = true;
-                        autoPilotCount++;
+                if (options.showActions) {
+                    uiCallbacks.onToolStart(toolMatch, toolArgs);
+                }
 
-                        // Failsafe Mesh: Confidence Gating — pause on uncertain language
-                        if (planMatch && /\b(maybe|i think|not sure|unsure|possibly|might be wrong|i guess|unclear)\b/i.test(planMatch)) {
-                            console.log(statusLine(emoji.warn, 'Confidence Gate', 'Rex seems uncertain', 'warning'));
-                            proceed = await p.confirm({ message: pc.cyan('Rex seems unsure. Proceed anyway?') });
-                            if (p.isCancel(proceed)) proceed = false;
-                        }
-                    } else {
-                        if (autoPilotCount >= maxAutoSteps) {
-                            logAutoPilotEvent('Auto-Pilot paused. Human review required.', {
-                                maxSteps: maxAutoSteps,
-                                tool: toolMatch,
-                                action: toolArgs?.action || null,
-                                reason: 'max_steps_reached'
-                            });
-                        if (config.showAutoPilotProgressLogs) {
-                            console.log(statusLine(emoji.warn, 'Auto-Pilot paused', `${maxAutoSteps} steps reached`, 'warning'));
-                        }
-                            autoPilotCount = 0; 
-                        }
-                        
-                        const stepDesc = isAgentIterating ? "next step" : "first step";
-                        proceed = await p.confirm({
-                            message: pc.cyan(`Rex is ready for the ${stepDesc}. Proceed?`)
-                        });
-                    }
-
-                    if (!p.isCancel(proceed) && proceed) {
-                        let preflightSummary = '';
-                        await showSubtleIntent(toolMatch, toolArgs || {});
-                        let undoCandidate = null;
-                        if ((toolMatch === 'write_file' || toolMatch === 'patch_file') && toolArgs?.filePath) {
-                            const resolvedPath = path.resolve(process.cwd(), String(toolArgs.filePath));
-                            const existedBefore = fs.existsSync(resolvedPath);
-                            let beforeContent = '';
-                            if (existedBefore) {
-                                try {
-                                    beforeContent = fs.readFileSync(resolvedPath, 'utf-8');
-                                } catch {
-                                    beforeContent = '';
-                                }
-                            }
-                            undoCandidate = {
-                                toolName: toolMatch,
-                                filePath: resolvedPath,
-                                existedBefore,
-                                beforeContent,
-                                at: Date.now()
-                            };
-                        }
-
-                        // Guardrail: when user asks for textual content, avoid analyze_page loops.
-                        if (toolMatch === 'browser_interact') {
-                            const browserAction = String(toolArgs?.action || '').toLowerCase();
-                            if (browserAction === 'analyze_page' && isLikelyContentRequest(sessionMeta.topLevelRequest)) {
-                                if (showInternalToolLogs) {
-                                    console.log(statusLine(emoji.spark, 'Auto-Correction', 'analyze_page -> extract_text', 'success'));
-                                }
-                                toolArgs = { ...toolArgs, action: 'extract_text' };
-                            }
-
-                            if ((browserAction === 'extract_text' || browserAction === 'read') && !toolArgs?.query) {
-                                toolArgs = { ...toolArgs, query: sessionMeta.topLevelRequest };
-                            }
-                        }
-
-                        // Proprietary browser reliability guard: run Preflight Analyse before risky actions.
-                        if (toolMatch === 'browser_interact') {
-                            const browserAction = String(toolArgs?.action || '').toLowerCase();
-                            const riskyBrowserActions = new Set(['click', 'type', 'hover', 'evaluate']);
-
-                            if (riskyBrowserActions.has(browserAction) && !toolArgs.skipPreflight) {
-                                try {
-                                    const preflightResult = await toolDef.action({
-                                        action: 'preflight_analyse',
-                                        targetAction: browserAction,
-                                        autoHeal: true,
-                                        query: toolArgs.query,
-                                        text: toolArgs.text
-                                    }, abortController.signal);
-
-                                    preflightSummary = String(preflightResult).slice(0, 1200);
-                                    if (showInternalToolLogs) {
-                                        console.log(statusLine(emoji.shield, 'Preflight', 'Browser health verified', 'success'));
-                                    }
-                                } catch (preflightErr) {
-                                    if (showInternalToolLogs) {
-                                        console.log(statusLine(emoji.warn, 'Preflight', preflightErr.message, 'warning'));
-                                    }
-                                }
-                            }
-                        }
-
-                        // Stuck detection: same tool+args 3x in a row
-                        const currentToolKey = `${toolMatch}:${JSON.stringify(toolArgs)}`;
-                        if (currentToolKey === lastToolKey) {
-                            stuckCount++;
-                            if (stuckCount >= 3) {
-                                if (showInternalToolLogs) {
-                                    console.log(statusLine(emoji.cross, 'STUCK DETECTED', 'Loop prevented', 'danger'));
-                                }
-                                logToolCall(toolMatch, toolArgs, 'STUCK (loop detected)', 'stuck');
-                                historyContext.push({ role: 'assistant', content: `[STUCK: Tried ${toolMatch} 3 times with same args — need different approach]` });
-                                if (planModeEnabled) {
-                                    plannerState.issueCounter += 1;
-                                    isAgentIterating = true;
-                                    userInput = `Planning issue detected: repeated loop on ${toolMatch} with same arguments. Create/update a subplan with a different approach and execute a different next action.`;
-                                    historyContext.push({ role: 'user', content: userInput });
-                                } else {
-                                    isAgentIterating = false;
-                                }
-                                stuckCount = 0;
-                                lastToolKey = '';
-                                continue;
-                            }
-                        } else {
-                            stuckCount = 1;
-                            lastToolKey = currentToolKey;
-                        }
-
-                        const engineOutcome = await runActionEngine({
-                            toolName: toolMatch,
-                            toolArgs,
-                            sessionMeta,
-                            historyContext,
-                            runtime: {
-                                options: { readonly: !!options.readonly },
-                                toolPermissions,
-                                isToolAllowed,
-                                writeTools: WRITE_TOOLS,
-                                osGatedTools: OS_GATED_TOOLS,
-                                state: actionEngineState
-                            },
-                            confirm: async (risk) => {
-                                const ok = await p.confirm({
-                                    message: pc.yellow(risk.reason),
-                                    initialValue: false
-                                });
-
-                                if (risk.code === 'os_access_gate') {
-                                    if (!p.isCancel(ok) && ok) {
-                                        console.log(statusLine(emoji.check, 'OS Access', 'Approved for session', 'success'));
-                                    } else {
-                                        console.log(statusLine(emoji.cross, 'OS Access', 'Denied by user', 'danger'));
-                                    }
-                                }
-
-                                return !p.isCancel(ok) && !!ok;
-                            },
-                            execute: async () => {
-                                let attempts = 0;
-                                const MAX_RETRIES = 3;
-
-                                while (attempts < MAX_RETRIES) {
-                                    try {
-                                        let result;
-                                        if (Object.keys(toolArgs).length > 0) {
-                                            if (toolMatch === 'delegate_task') {
-                                                result = await toolDef.action(toolArgs, isLocal, abortController.signal);
-                                            } else {
-                                                // Pass signal if tool supports it (like browser_interact)
-                                                result = await toolDef.action(toolArgs, abortController.signal);
-                                            }
-                                        } else {
-                                            result = await toolDef.action();
-                                        }
-                                        return { result, retries: attempts };
-                                    } catch (toolErr) {
-                                        if (toolErr.name === 'AbortError' || toolErr.message === 'Aborted') {
-                                            throw toolErr;
-                                        }
-                                        attempts++;
-                                        if (attempts >= MAX_RETRIES) {
-                                            throw new Error(`Tool failed after ${MAX_RETRIES} attempts: ${toolErr.message}`);
-                                        }
-                                            if (showInternalToolLogs) {
-                                                console.log(statusLine(emoji.warn, 'Tool Error', `Retrying ${attempts}/${MAX_RETRIES}`, 'warning'));
-                                            }
-                                    }
-                                }
-
-                                throw new Error('Unexpected execution state.');
-                            }
-                        });
-
-                        if (engineOutcome.status === 'blocked') {
-                            if (showInternalToolLogs) {
-                                console.log(statusLine(emoji.shield, 'BLOCKED', toolMatch, 'danger'));
-                            }
-                            logToolCall(toolMatch, toolArgs, `BLOCKED (${engineOutcome.risk.code})`, 'blocked');
-                            lastExecution = {
-                                toolName: toolMatch,
-                                args: toolArgs || {},
-                                thought: String(planMatch || '').trim(),
-                                status: 'blocked',
-                                resultPreview: String(engineOutcome?.risk?.reason || ''),
-                                retries: 0,
-                                at: Date.now()
-                            };
-                            historyContext.push({ role: 'assistant', content: `[BLOCKED: ${toolMatch} — ${engineOutcome.risk.reason}]` });
-                            if (planModeEnabled) {
-                                plannerState.issueCounter += 1;
-                                isAgentIterating = true;
-                                userInput = `Planning issue detected: tool ${toolMatch} was blocked (${engineOutcome.risk.reason}). Create or update a subplan to resolve this blocker using allowed tools, execute one step now, then return to the parent task ${plannerState.activeTaskId || 'when unblocked'}.`;
-                                historyContext.push({ role: 'user', content: userInput });
-                            } else {
-                                isAgentIterating = false;
-                            }
-                            continue;
-                        }
-
-                        if (engineOutcome.status === 'cancelled') {
-                            logToolCall(toolMatch, toolArgs, `CANCELLED (${engineOutcome.risk.code})`, 'blocked');
-                            lastExecution = {
-                                toolName: toolMatch,
-                                args: toolArgs || {},
-                                thought: String(planMatch || '').trim(),
-                                status: 'cancelled',
-                                resultPreview: String(engineOutcome?.risk?.reason || ''),
-                                retries: 0,
-                                at: Date.now()
-                            };
-                            historyContext.push({ role: 'assistant', content: `[CANCELLED: ${toolMatch} requires confirmation]` });
-                            isAgentIterating = false;
-                            continue;
-                        }
-
-                        const result = engineOutcome.result;
-                        const retryCount = Number(engineOutcome.retries || 0);
-                        const toolSucceeded = engineOutcome.status === 'success';
-                        lastExecution = {
-                            toolName: toolMatch,
-                            args: toolArgs || {},
-                            thought: String(planMatch || '').trim(),
-                            status: toolSucceeded ? 'success' : 'error',
-                            resultPreview: String(result || '').slice(0, 500),
-                            retries: retryCount,
-                            at: Date.now()
-                        };
-                        if (toolSucceeded && undoCandidate) {
-                            undoStack.push(undoCandidate);
-                            if (undoStack.length > 30) undoStack.shift();
-                        }
-
-                        // DeepContext: track recent tool outcomes for situational awareness
-                        recentToolResults.push({ tool: toolMatch, args: toolArgs, result: String(result || '').slice(0, 200) });
-                        if (recentToolResults.length > 5) recentToolResults.shift();
-
-                        // Failsafe Mesh: rollback checkpoint before destructive file writes
-                        if ((toolMatch === 'write_file' || toolMatch === 'patch_file') && toolArgs.filePath) {
-                            try {
-                                const checkpointDir = path.join(process.cwd(), '.agent', 'checkpoints');
-                                if (!fs.existsSync(checkpointDir)) fs.mkdirSync(checkpointDir, { recursive: true });
-                                const src = toolArgs.filePath;
-                                if (fs.existsSync(src)) {
-                                    const bakName = path.basename(src) + '.bak';
-                                    fs.copyFileSync(src, path.join(checkpointDir, bakName));
-                                }
-                            } catch {}
-                        }
-
-                        // Audit log
-                        logToolCall(toolMatch, toolArgs, result, toolSucceeded ? 'success' : 'error');
-
-                        // Diff view for patch_file
-                        if (toolMatch === 'patch_file' && toolArgs.targetContent && toolArgs.replacementContent) {
-                            const diffLines = [];
-                            toolArgs.targetContent.split('\n').forEach(l => diffLines.push(pc.red(`  - ${l}`)));
-                            toolArgs.replacementContent.split('\n').forEach(l => diffLines.push(pc.green(`  + ${l}`)));
-                            if (showInternalToolLogs) {
-                                console.log(`\n  ${emoji.paint}  ${brandTheme('DIFF VIEW')}\n${pc.dim('  ' + terminalGlyphs().line.repeat(40))}\n${diffLines.join('\n')}\n`);
-                            }
-                        }
-
-                        let confirmationMsg = `[I ran the ${toolMatch} tool. Thought: ${planMatch}]`;
-                        if (preflightSummary) {
-                            confirmationMsg += `\nPreflight Analyse:\n${preflightSummary}`;
-                        }
-                        if (result) {
-                            const truncated = String(result).length > 3000 ? String(result).slice(0, 3000) + '\n...[output truncated]' : result;
-                            confirmationMsg += `\nOutput from tool:\n${truncated}`;
-                        }
-                        
-                        historyContext.push({ role: 'assistant', content: confirmationMsg });
-                        autoPilotCount = (config.agentPermission === 'auto-pilot') ? autoPilotCount : 0;
-                                                nonActionFollowupCount = 0;
-                        isAgentIterating = true;
-
-                        if (planModeEnabled) {
-                            if (toolSucceeded) plannerState.issueCounter = 0;
-                            const doneCount = plannerState.main.tasks.filter(t => t.status === 'done').length;
-                            const totalCount = plannerState.main.tasks.length;
-                            const subplanStatus = plannerState.activeSubplan
-                                ? ` | Subplan: ${plannerState.activeSubplan.id}`
-                                : '';
-                            if (showInternalToolLogs) {
-                                console.log(statusLine(emoji.map, 'Progress', `${doneCount}/${totalCount} tasks done${subplanStatus}`, 'success'));
-                            }
-                        }
-                        
-                        const toolFailed = !toolSucceeded || String(result || '').startsWith('Tool error after');
-                        const resultText = String(result || '');
-                        const weakAutonomousCompletion = toolMatch === 'autonomous_web_agent'
-                            && /goal achieved/i.test(resultText)
-                            && isLikelyContentRequest(sessionMeta.topLevelRequest)
-                            && !hasConcreteAnswerShape(resultText);
-
-                        if (planModeEnabled && toolFailed) {
-                            plannerState.issueCounter += 1;
-                            if (plannerState.issueCounter > 3) {
-                                console.log(statusLine(emoji.cross, 'Planner', 'Healing failed (3 attempts)', 'danger'));
-                                isAgentIterating = false;
-                                plannerState.issueCounter = 0;
-                            } else {
-                                userInput = `Planning issue detected (Healing attempt ${plannerState.issueCounter}/3): ${toolMatch} failed. Build or update a subplan to fix this specific issue, execute the first subplan step now, and after resolution continue the parent main-plan task ${plannerState.activeTaskId || ''}.`;
-                                if (config.showAutoPilotProgressLogs) {
-                                    console.log(statusLine(emoji.paint, 'Planner', `Healing attempt ${plannerState.issueCounter}/3`, 'warning'));
-                                }
-                            }
-                        } else if (weakAutonomousCompletion) {
-                            userInput = `The autonomous_web_agent response is meta-level but missing concrete extracted data. Do NOT call analyze_page. Use browser_interact with action extract_text on the current page, then return the final answer as a clear bullet list with all requested items.`;
-                        } else if (planModeEnabled) {
-                            userInput = `Tool result captured for ${toolMatch}. Briefly report findings, update plan/subplan statuses, and execute the next best step. If all main tasks are done, finish normally without JSON.`;
-                        } else {
-                            userInput = `The ${toolMatch} tool output was received. Report your findings. If the goal "${sessionMeta.topLevelRequest}" is completely finished, reply normally without any JSON tool call to end the process. Otherwise, move to the next step.`;
-                        }
-                        historyContext.push({ role: 'user', content: userInput });
-                        continue;
-                    } else {
-                        p.note(pc.red(`Action cancelled by user.`), REX_PERSONA);
-                        historyContext.push({ role: 'assistant', content: `[User cancelled my plan to run ${toolMatch}]` });
-                        autoPilotCount = 0; 
-                        isAgentIterating = false;
-                    }
+                let proceed = false;
+                const maxAutoSteps = planModeEnabled ? planMaxSteps : 10;
+                if (config.agentPermission === 'auto-pilot' && autoPilotCount < maxAutoSteps) {
+                    proceed = true;
+                    autoPilotCount++;
                 } else {
-                    p.note(pc.red(`Rex tried to run a tool called [${toolMatch}] but couldn't find it. Intern mistake!`), REX_PERSONA);
-                    historyContext.push({ role: 'assistant', content: `[I hallucinated a tool called ${toolMatch}]` });
+                    proceed = await uiCallbacks.confirm(`Rex wants to run "${toolMatch}". Proceed?`);
+                }
+
+                if (proceed) {
+                    const engineOutcome = await runActionEngine({
+                        toolName: toolMatch,
+                        toolArgs,
+                        sessionMeta,
+                        historyContext,
+                        runtime: {
+                            options,
+                            toolPermissions,
+                            isToolAllowed,
+                            writeTools: WRITE_TOOLS,
+                            osGatedTools: OS_GATED_TOOLS,
+                            state: actionEngineState
+                        },
+                        confirm: async (risk) => {
+                            return await uiCallbacks.confirm(`Security confirm: ${risk.reason}. Proceed?`);
+                        },
+                        execute: async () => {
+                            const toolDef = AVAILABLE_TOOLS.find(t => t.name === toolMatch);
+                            const result = await toolDef.action(toolArgs, abortController.signal);
+                            return { result };
+                        }
+                    });
+
+                    const result = engineOutcome.result;
+                    if (options.showActions) {
+                        uiCallbacks.onToolResult(toolMatch, result);
+                    }
+
+                    recentToolResults.push({
+                        tool: toolMatch,
+                        args: toolArgs,
+                        result: String(result || '').slice(0, 200)
+                    });
+                    if (recentToolResults.length > 5) recentToolResults.shift();
+
+                    lastExecution = {
+                        toolName: toolMatch,
+                        toolArgs,
+                        outcome: engineOutcome,
+                        timestamp: Date.now()
+                    };
+
+                    historyContext.push({ role: 'assistant', content: responseText });
+                    historyContext.push({ role: 'user', content: `Tool execution result for ${toolMatch}:\n${result}` });
+                } else {
+                    historyContext.push({ role: 'assistant', content: responseText });
+                    historyContext.push({ role: 'user', content: 'Tool execution cancelled by user.' });
                     isAgentIterating = false;
                 }
             } else {
-                const midExecutionNoAction = isAgentIterating && !looksLikeCompletion(responseText);
-                await showAssistantMessage(responseText, REX_PERSONA);
+                uiCallbacks.onAssistantMessage(responseText);
                 historyContext.push({ role: 'assistant', content: responseText });
-                lastExecution = {
-                    toolName: null,
-                    args: {},
-                    thought: 'assistant-text-response',
-                    status: 'message',
-                    resultPreview: String(responseText || '').slice(0, 500),
-                    retries: 0,
-                    at: Date.now()
-                };
-
-                // Only force follow-up tool nudges in explicit planner mode.
-                // In normal chat mode, treat a plain-text response as final and return control to user.
-                if (planModeEnabled && midExecutionNoAction && nonActionFollowupCount < 2) {
-                    nonActionFollowupCount += 1;
-                    const nudge = 'You are still in execution mode and the task is not complete. Respond with a JSON tool action for the next concrete step. If web search is needed, use browser_interact with {"action":"search","query":"..."}.';
-                    historyContext.push({ role: 'user', content: nudge });
-                    isAgentIterating = true;
-                    continue;
-                }
-
-                nonActionFollowupCount = 0;
-                autoPilotCount = 0; 
                 isAgentIterating = false;
             }
-
-        } catch (err) {
-            s.stop();
-            if (err.name === 'AbortError' || err.message === 'Aborted') {
-                isAgentIterating = false;
-                continue;
-            }
-            p.log.error(pc.red(`Rex crashed: ${err.message}`));
         }
-    }
+    };
+
+    // BTW side-channel: runs a fresh isolated query without touching main historyContext
+    const onBtwQuery = async (question) => {
+        const messages = [
+            {
+                role: 'system',
+                content: 'You are Rex in a side-channel. The user asked a quick question while you were working on something else. Answer ONLY the side question. Be concise, direct, and helpful — keep it under 3 sentences unless detail is truly necessary. Do NOT reference the main task unless asked.'
+            },
+            { role: 'user', content: String(question || '').trim() }
+        ];
+        const isLocal = config.aiModel === 'local-llama' || config.aiModel === 'ollama';
+        return await getAgentResponse(messages, isLocal, null, { config, roleHint: 'runner' });
+    };
+
+    await runInkUi(historyContext, onStartSession, onBtwQuery);
 
     if (process.stdin?.isTTY) {
         process.stdin.removeListener('data', handleLiveBtwInput);
@@ -1712,7 +1242,7 @@ function resolveAgentTarget(config, roleHint = 'runner') {
 
     const defaultModelForProvider = (provider) => {
         if (provider === 'openai') return config.agentRunnerModel || 'gpt-5-mini';
-        if (provider === 'gemini') return config.agentPlannerGeminiModel || config.geminiModel || 'gemini-2.5-flash';
+        if (provider === 'gemini') return config.agentPlannerGeminiModel || config.geminiModel || 'gemini-3.5-flash';
         if (provider === 'claude') return 'claude-3-haiku-20240307';
         if (provider === 'deepseek') return 'deepseek-chat';
         return '';
@@ -1738,7 +1268,7 @@ function resolveAgentTarget(config, roleHint = 'runner') {
     if (selected === 'gemini' && hasProviderKey(config, 'gemini')) {
         return {
             provider: 'gemini',
-            model: config.agentPlannerGeminiModel || 'gemini-2.5-flash'
+            model: config.agentPlannerGeminiModel || 'gemini-3.5-flash'
         };
     }
 
@@ -1999,6 +1529,222 @@ $r = New-Object System.Media.SoundPlayer;
                 return true;
             }
             await runBtwSideQuery(arg, config);
+            return true;
+        }
+
+        case '/screen':
+        case '/vision': {
+            const isVoice = (arg || '').toLowerCase().startsWith('voice');
+            const prompt = isVoice ? arg.slice(5).trim() : (arg || '').trim();
+            const s = p.spinner();
+            s.start('Rex is scanning your screen (JARVIS Vision)...');
+            try {
+                const { analyzeScreen } = await import('./vision.js');
+                const analysis = await analyzeScreen(null, prompt || null, { speak: isVoice });
+                s.stop(pc.green('Screen analysis complete.'));
+                p.note(analysis, 'Rex Vision (JARVIS)');
+            } catch (err) {
+                s.stop(pc.red('Vision failed: ' + err.message));
+            }
+            return true;
+        }
+
+        case '/cursor': {
+            const subCmd = (arg || '').toLowerCase().trim();
+            const { startScreenCursor, stopScreenCursor, isScreenCursorRunning, runCursorDemoTour, cursorSpeak } = await import('./screenCursor.js');
+            if (subCmd === 'start' || subCmd === 'on' || subCmd === 'follow') {
+                await startScreenCursor({ mode: 'follow', checkPermissions: true });
+            } else if (subCmd === 'stop' || subCmd === 'off') {
+                stopScreenCursor();
+                p.log.success('Rex Screen Cursor stopped.');
+            } else if (subCmd === 'demo' || subCmd === 'tour') {
+                await runCursorDemoTour();
+            } else if (subCmd === 'listen' || subCmd === 'voice') {
+                const { triggerVoiceCommand } = await import('./screenCursor.js');
+                p.log.info(pc.cyan('🎙️ Listening... Speak your command for Rex to figure out on your screen!'));
+                await triggerVoiceCommand();
+            } else if (subCmd.startsWith('speak ')) {
+                const txt = arg.slice(6).trim();
+                if (!isScreenCursorRunning()) await startScreenCursor({ silent: true });
+                cursorSpeak(txt);
+                p.log.success(`Rex spoke on screen: "${txt}"`);
+            } else {
+                p.note(
+                    [
+                        `Running: ${isScreenCursorRunning() ? pc.green('ACTIVE') : pc.yellow('STOPPED')}`,
+                        'Commands: /cursor on | /cursor off | /cursor listen | /cursor demo | /cursor speak <text>',
+                        pc.dim('Global Shortcut: Press Control + Shift + Space (or Ctrl + Shift + R) anywhere on macOS!')
+                    ].join('\n'),
+                    'Rex Screen Cursor'
+                );
+            }
+            return true;
+        }
+
+        case '/butler':
+        case '/alfred': {
+            const subCmd = (arg || '').toLowerCase().trim();
+            if (subCmd === 'on') {
+                const { toggleAlfredButler } = await import('./alfredButler.js');
+                const msg = await toggleAlfredButler(true);
+                p.note(msg, 'Alfred Butler');
+            } else if (subCmd === 'off') {
+                const { toggleAlfredButler } = await import('./alfredButler.js');
+                const msg = await toggleAlfredButler(false);
+                p.note(msg, 'Alfred Butler');
+            } else if (subCmd === 'briefing' || subCmd === 'brief') {
+                const s = p.spinner();
+                s.start('Preparing Alfred briefing...');
+                const { generateMorningBriefing, speakBriefing } = await import('./alfredButler.js');
+                const briefing = await generateMorningBriefing();
+                s.stop('Briefing ready.');
+                p.note(briefing.text, briefing.greeting);
+                await speakBriefing(briefing.text);
+            } else if (subCmd === 'status' || subCmd === 'vitals') {
+                const { getSystemVitals, getWorkspaceIntel } = await import('./alfredButler.js');
+                const [v, g] = await Promise.all([getSystemVitals(), getWorkspaceIntel()]);
+                const details = [
+                    `🔋 Battery: ${v.batteryPercent !== null ? v.batteryPercent + '% (' + v.powerSource + ')' : 'N/A'}`,
+                    `⚙️ CPU Load: ${v.loadAvg.toFixed(2)} (${v.cpuCores} cores)`,
+                    `💾 Memory: ${v.freeMemMB}MB free / ${v.totalMemMB}MB total`,
+                    `📁 Workspace: ${g.branch ? 'Branch "' + g.branch + '" (' + g.uncommittedCount + ' uncommitted changes)' : 'Not in git'}`
+                ].join('\n');
+                p.note(details, 'Alfred System Vitals');
+            } else {
+                p.note(
+                    'Usage:\n' +
+                    '  /butler on        - Opt-in and enable autonomous Alfred butler\n' +
+                    '  /butler off       - Disable proactivity\n' +
+                    '  /butler briefing  - Request morning/day executive briefing\n' +
+                    '  /butler status    - View system & workspace vitals',
+                    'Alfred Butler'
+                );
+            }
+            return true;
+        }
+
+        case '/cues': {
+            if (arg === 'off') {
+                config.audioCuesEnabled = false;
+                saveConfig(config);
+                p.note(pc.yellow('Audio cues muted.'), 'Audio Cues');
+            } else {
+                config.audioCuesEnabled = true;
+                saveConfig(config);
+                const { playAudioCue } = await import('./audioCues.js');
+                playAudioCue('success');
+                p.note(pc.green('Audio cues enabled.'), 'Audio Cues');
+            }
+            return true;
+        }
+
+        case '/mac':
+        case '/applescript':
+        case '/as': {
+            const raw = (arg || '').trim();
+            if (!raw) {
+                p.note(
+                    'Usage:\n' +
+                    '  /mac volume <0-100>           - Set Mac volume\n' +
+                    '  /mac mute <on|off>            - Mute/unmute Mac\n' +
+                    '  /mac notify <message>         - Native Mac notification\n' +
+                    '  /mac media <play|pause|next|prev|track> - Control Spotify/Music\n' +
+                    '  /mac lock                     - Lock Mac screen\n' +
+                    '  /mac open <appName>           - Launch/activate Mac application\n' +
+                    '  /mac tab                      - Get active Chrome/Safari tab\n' +
+                    '  /mac reminder <task>          - Add to Apple Reminders\n' +
+                    '  /mac note <title> [body]      - Create Apple Note\n' +
+                    '  /mac <raw applescript>        - Execute arbitrary AppleScript',
+                    'macOS AppleScript Bridge'
+                );
+                return true;
+            }
+
+            const { executeAppleScript, macSystem, macMedia, macApps, macBrowsers, macProductivity } = await import('./appleScript.js');
+            const parts = raw.split(' ');
+            const sub = parts[0].toLowerCase();
+            const rest = parts.slice(1).join(' ').trim();
+
+            if (sub === 'volume') {
+                const vol = parseInt(rest, 10);
+                const res = isNaN(vol) ? await macSystem.getVolume() : await macSystem.setVolume(vol);
+                p.note(typeof res === 'number' ? `Current volume: ${res}%` : res, 'macOS Volume');
+            } else if (sub === 'mute') {
+                const res = await macSystem.setMute(rest !== 'off');
+                p.note(res, 'macOS Mute');
+            } else if (sub === 'notify') {
+                await macSystem.displayNotification(rest || 'Hello from Rex!');
+                p.note(pc.green(`Notification sent: "${rest}"`), 'macOS Notification');
+            } else if (sub === 'lock') {
+                await macSystem.lockScreen();
+                p.note(pc.green('Screen locked.'), 'macOS Security');
+            } else if (sub === 'media') {
+                if (rest === 'play') await macMedia.play();
+                else if (rest === 'pause') await macMedia.pause();
+                else if (rest === 'next') await macMedia.next();
+                else if (rest === 'prev' || rest === 'previous') await macMedia.previous();
+                else if (rest === 'track') {
+                    const tr = await macMedia.getCurrentTrack();
+                    p.note(tr ? `${tr.app}: ${tr.name} by ${tr.artist} (${tr.album}) [${tr.state}]` : 'No track playing.', 'Now Playing');
+                    return true;
+                } else await macMedia.playPause();
+                const tr = await macMedia.getCurrentTrack();
+                p.note(tr ? `${tr.app}: ${tr.name} by ${tr.artist} [${tr.state}]` : 'Media command sent.', 'Media Control');
+            } else if (sub === 'open') {
+                const res = await macApps.openApp(rest);
+                p.note(res.success ? `Opened ${rest}` : res.error, 'macOS App');
+            } else if (sub === 'tab') {
+                const tab = await macBrowsers.getActiveTab();
+                p.note(tab ? `[${tab.browser}] ${tab.title}\n${tab.url}` : 'No active browser window detected.', 'Active Browser Tab');
+            } else if (sub === 'reminder') {
+                const res = await macProductivity.addReminder(rest);
+                p.note(res, 'Apple Reminders');
+            } else if (sub === 'note') {
+                const [title, ...bodyParts] = rest.split(' ');
+                const res = await macProductivity.createNote(title, bodyParts.join(' '));
+                p.note(res, 'Apple Notes');
+            } else {
+                // Execute as raw AppleScript
+                const s = p.spinner();
+                s.start('Executing AppleScript...');
+                const res = await executeAppleScript(raw);
+                if (res.success) {
+                    s.stop(pc.green('AppleScript executed successfully.'));
+                    if (res.output) p.note(res.output, 'AppleScript Output');
+                } else {
+                    s.stop(pc.red('AppleScript error:'));
+                    p.log.error(res.error);
+                }
+            }
+            return true;
+        }
+
+        case '/dossier':
+        case '/personal-memory': {
+            const { getButlerDossier } = await import('./personalMemory.js');
+            p.note(getButlerDossier(), 'Alfred Personal Dossier');
+            return true;
+        }
+
+        case '/remember': {
+            if (!arg) {
+                p.note('Usage: /remember <fact to commit to Rex personal memory>', 'Memory');
+                return true;
+            }
+            const { rememberFact } = await import('./personalMemory.js');
+            const msg = rememberFact(arg);
+            p.note(pc.green(msg), 'Personal Knowledge Graph');
+            return true;
+        }
+
+        case '/forget': {
+            if (!arg) {
+                p.note('Usage: /forget <keyword to remove from Rex personal memory>', 'Memory');
+                return true;
+            }
+            const { forgetFact } = await import('./personalMemory.js');
+            const msg = forgetFact(arg);
+            p.note(pc.yellow(msg), 'Personal Knowledge Graph');
             return true;
         }
 
@@ -2712,6 +2458,67 @@ $r = New-Object System.Media.SoundPlayer;
             return true;
         }
 
+        case '/look':
+        case '/keep-a-look': {
+            const url = await p.text({
+                message: 'Webpage URL to monitor:',
+                placeholder: 'https://example.com/tickets',
+                validate: (v) => !v.trim() ? 'URL is required.' : undefined
+            });
+            if (p.isCancel(url)) return true;
+
+            const condition = await p.text({
+                message: 'Condition to watch for (optional, leave empty for any change):',
+                placeholder: 'tickets are available'
+            });
+            if (p.isCancel(condition)) return true;
+
+            const action = await p.text({
+                message: 'Goal to execute once condition is met:',
+                placeholder: 'add 2 to checkout and take a screenshot of QR code',
+                validate: (v) => !v.trim() ? 'Goal is required.' : undefined
+            });
+            if (p.isCancel(action)) return true;
+
+            const intervalStr = await p.text({
+                message: 'Check interval in seconds (default 30):',
+                placeholder: '30'
+            });
+            if (p.isCancel(intervalStr)) return true;
+            const intervalSeconds = Number(intervalStr) || 30;
+
+            const selector = await p.text({
+                message: 'CSS selector to narrow down monitoring (optional):',
+                placeholder: '.ticket-booking-status'
+            });
+            if (p.isCancel(selector)) return true;
+
+            const headless = await p.confirm({
+                message: 'Run browser in headless mode?',
+                initialValue: false
+            });
+            if (p.isCancel(headless)) return true;
+
+            p.note(`Starting Keep-A-Look monitor job...\nURL: ${url}\nWatching: ${condition || 'Any content change'}\nAction: ${action}`, 'Keep-A-Look');
+
+            const { keep_a_look } = await import('./webTools.js');
+            try {
+                const res = await keep_a_look({
+                    url: url.trim(),
+                    condition: condition.trim(),
+                    action: action.trim(),
+                    intervalSeconds,
+                    selector: selector.trim() || undefined,
+                    headless
+                });
+                p.note(res, 'Keep-A-Look Done');
+            } catch (err) {
+                p.log.error(`Keep-A-Look Error: ${err.message}`);
+            }
+
+            return true;
+        }
+
         case '/cost': {
             const value = arg.toLowerCase();
 
@@ -2760,6 +2567,12 @@ $r = New-Object System.Media.SoundPlayer;
                 `${pc.green('/toggle <flag>')} - Session settings (debug, quiet, actions, internal-logs, plan)`,
                 `${pc.green('/cortex <action>')} - CortexKit (map, hindsight, echo, deja, phantom)`,
                 `${pc.green('/swarm <task>')} - Delegate task to background sub-agent`,
+                `${pc.bold('Butler & JARVIS Suite')}`,
+                `${pc.green('/cursor [on|off|demo|speak]')} - Persistent Rex macOS Screen Cursor (Second Cursor)`,
+                `${pc.green('/butler [on|off|briefing|status]')} - Alfred autonomous proactive steward (opt-in)`,
+                `${pc.green('/screen [prompt]')} - JARVIS visual screen reasoning via Gemini 3.5 Flash`,
+                `${pc.green('/screen voice [prompt]')} - JARVIS visual reasoning with Cartesia speech output`,
+                `${pc.green('/cues [on|off]')} - Acoustic feedback cues for agent events`,
                 '',
                 `${pc.bold('Utilities')}`,
                 `${pc.green('/vibes on|off|status')} - Toggle Rex on Vibes personality mode`,
@@ -2776,6 +2589,7 @@ $r = New-Object System.Media.SoundPlayer;
                 `${pc.green('/browser')} - List active browser tabs`,
                 `${pc.green('/babysit [goal|status|snapshot|stop]')} - Passive teach mode with cursor-follow + yes/no labeling`,
                 `${pc.green('/practice mode <goal>')} - Supervised autonomous practice with nano coach`,
+                `${pc.green('/keep-a-look')} - Monitor a page for changes and trigger auto-checkout/goals`,
                 `${pc.green('/cost [reset|rebuild]')} - Session/workspace AI spend`,
                 `${pc.green('/profile save|load <name>')} - Manage config profiles`,
                 `${pc.green('/clear')} - Clear terminal screen`,

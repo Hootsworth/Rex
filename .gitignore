@@ -17,3 +17,17 @@ __pycache__/
 .env.*.local
 .rex/doctor-last-report.json
 .rex/preflight-analyse-plot.json
+.rex/cache/
+.rex/vision/
+.rex_briefing_*.wav
+*.wav
+src/native/bin/
+.wwebjs_cache/
+.rex-data/whatsapp_auth/
+photobooth_capture.*
+main
+coucou/
+LangChain/
+Preflight Designer/
+aegis-rex/
+linkup/

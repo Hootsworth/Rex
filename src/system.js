@@ -123,8 +123,8 @@ export async function managePower(action) {
             if (action === 'restart') cmd = 'shutdown /r /t 60';
             if (action === 'sleep') cmd = 'rundll32.exe powrprof.dll,SetSuspendState 0,1,0';
         } else if (process.platform === 'darwin') {
-            if (action === 'shutdown') cmd = 'osascript -e "tell application \"System Events\" to shut down"';
-            if (action === 'restart') cmd = 'osascript -e "tell application \"System Events\" to restart"';
+            if (action === 'shutdown') cmd = "osascript -e 'tell application \"System Events\" to shut down'";
+            if (action === 'restart') cmd = "osascript -e 'tell application \"System Events\" to restart'";
             if (action === 'sleep') cmd = 'pmset sleepnow';
         } else {
             if (action === 'shutdown') cmd = 'shutdown -h +1';

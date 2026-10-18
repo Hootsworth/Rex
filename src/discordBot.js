@@ -21,6 +21,46 @@ import {
     processAgentRequest,
     PLATFORM_PERSONAS
 } from './chatPlatformCore.js';
+import {
+    startCompanionEngine,
+    handleTargetUserMessage,
+    tryHandleCompanionCommand
+} from './companionDelegates.js';
+import {
+    tryHandleSocialRadarCommand,
+    getDueEventsToday,
+    saveSocialRadar,
+    loadSocialRadar
+} from './socialRadar.js';
+import {
+    startBurnoutSentinel,
+    recordUserActivity,
+    tryHandleBurnoutCommand
+} from './burnoutSentinel.js';
+import {
+    tryHandleVoiceMemoCommand
+} from './voiceMemos.js';
+import {
+    tryHandleDinoHoardCommand
+} from './dinoHoard.js';
+import {
+    tryHandleIMessageCommand
+} from './imessage.js';
+import {
+    tryHandleShortcutsCommand
+} from './shortcuts.js';
+import {
+    tryHandleCameraCommand
+} from './cameraSnapshot.js';
+import {
+    tryHandleObsidianCommand
+} from './obsidianVault.js';
+import {
+    detectComputerControlIntent,
+    requestComputerPermission,
+    handleComputerPermissionInteraction,
+    handleComputerPermissionTextMessage
+} from './discordComputerControl.js';
 
 async function executeBackendTool(toolName, args, originalMessage) {
     // This local wrapper handles the Discord-specific logic for send_discord_file
@@ -59,6 +99,13 @@ async function executeBackendTool(toolName, args, originalMessage) {
 
 export async function startDiscordBot() {
     const config = loadConfig();
+
+    // Auto-start active in-browser Chrome extension bridge on 8787 by default
+    try {
+        const { startBrowserBridge } = await import('./browserBridge.js');
+        startBrowserBridge(8787);
+    } catch {}
+
     const agenticRuntime = createDiscordAgenticRuntime(config);
     const pollSessions = new Map();
     const mcqSessions = new Map();
@@ -94,7 +141,7 @@ export async function startDiscordBot() {
     }
 
     function resolvePriorityProvider(cfg) {
-        if (cfg.geminiKey) return { provider: 'gemini', model: cfg.geminiModel || 'gemini-2.5-flash' };
+        if (cfg.geminiKey) return { provider: 'gemini', model: cfg.geminiModel || 'gemini-3.5-flash' };
         if (cfg.openaiKey) return { provider: 'openai', model: cfg.openaiModel || 'gpt-5-mini' };
         if (cfg.claudeKey) return { provider: 'claude', model: cfg.claudeModel || 'claude-3-haiku-20240307' };
         if (cfg.deepseekKey) return { provider: 'deepseek', model: cfg.deepseekModel || 'deepseek-chat' };
@@ -233,7 +280,8 @@ export async function startDiscordBot() {
                         { name: 'default', value: 'default' },
                         { name: 'vibes', value: 'vibes' },
                         { name: 'intern', value: 'intern' },
-                        { name: 'savage', value: 'savage' }
+                        { name: 'savage', value: 'savage' },
+                        { name: 'rocky', value: 'rocky' }
                     ))
         ];
 
@@ -324,6 +372,13 @@ export async function startDiscordBot() {
                     sendTyping: async () => {
                         await originalMessage.channel.sendTyping().catch(() => {});
                     },
+                    requestComputerPermission: async (task) => {
+                        return requestComputerPermission({
+                            message: originalMessage,
+                            task,
+                            client: originalMessage.client
+                        });
+                    },
                     fileToolName: 'send_discord_file'
                 }
             });
@@ -331,25 +386,12 @@ export async function startDiscordBot() {
             if (finalReplyText) {
                 console.log(`${pc.green('Rex (Discord):')} ${finalReplyText.substring(0, 50).replace(/\n/g, ' ')}...`);
 
-                // Voice TTS Stream Response
+                // Voice TTS Stream Response via Cartesia
                 const vc = activeVoiceConnections[originalMessage.guild?.id];
                 if (vc) {
                     try {
-                        const { ttsSave } = await import('edge-tts');
-                        const tmpAudioPath = path.join(process.cwd(), `.rex_discord_voice_${originalMessage.id || Date.now()}.mp3`);
-                        
-                        let textToSpeak = finalReplyText.replace(/(```[\s\S]*?```)/g, ' [code block omitted for voice] ');
-                        textToSpeak = textToSpeak.replace(/[`*_#]/g, '').slice(0, 1000);
-                        
-                        await ttsSave(textToSpeak, tmpAudioPath, { voice: 'en-US-ChristopherNeural', rate: '+5%' });
-                        const { createAudioResource } = await import('@discordjs/voice');
-                        const resource = createAudioResource(tmpAudioPath);
-                        vc.player.play(resource);
-                        
-                        const { AudioPlayerStatus } = await import('@discordjs/voice');
-                        vc.player.once(AudioPlayerStatus.Idle, () => {
-                            setTimeout(() => { try { fs.unlinkSync(tmpAudioPath) } catch(e){} }, 1000);
-                        });
+                        const { playTtsToVoicePlayer } = await import('./cartesia.js');
+                        await playTtsToVoicePlayer(vc.player, finalReplyText, String(originalMessage.id || Date.now()));
                     } catch(e) { console.error("Voice TTS Output Error: ", e.message); }
                 }
             }
@@ -361,58 +403,108 @@ export async function startDiscordBot() {
         }
     }
 
+    function createWavHeader(dataLength, sampleRate = 48000, numChannels = 1, bitsPerSample = 16) {
+        const header = Buffer.alloc(44);
+        header.write('RIFF', 0);
+        header.writeUInt32LE(36 + dataLength, 4);
+        header.write('WAVE', 8);
+        header.write('fmt ', 12);
+        header.writeUInt32LE(16, 16);
+        header.writeUInt16LE(1, 20); // PCM
+        header.writeUInt16LE(numChannels, 22);
+        header.writeUInt32LE(sampleRate, 24);
+        header.writeUInt32LE(sampleRate * numChannels * (bitsPerSample / 8), 28);
+        header.writeUInt16LE(numChannels * (bitsPerSample / 8), 32);
+        header.writeUInt16LE(bitsPerSample, 34);
+        header.write('data', 36);
+        header.writeUInt32LE(dataLength, 40);
+        return header;
+    }
+
     function setupVoiceReceiver(connection, channel, sourceUserId) {
         const receiver = connection.receiver;
+        const activeVoiceStreams = new Map();
         
         receiver.speaking.on('start', (userId) => {
             if (userId !== sourceUserId) return;
+            // Prevent duplicate subscriptions while the user is already speaking
+            if (activeVoiceStreams.has(userId)) return;
             
             const opusStream = receiver.subscribe(userId, {
                 end: {
                     behavior: EndBehaviorType.AfterSilence,
-                    duration: 1500,
+                    duration: 1200,
                 },
             });
 
-            const oggPath = path.join(process.cwd(), `.rex_transcription_${Date.now()}.ogg`);
-            const oggStream = new Prism.opus.OggDemuxer();
-            const fileStream = fs.createWriteStream(oggPath);
+            activeVoiceStreams.set(userId, opusStream);
 
-            // We can actually just pipe the raw opus stream into an ogg demuxer/muxer
-            // But usually the Opus stream from discord is just frames.
-            // Using a simple muxer:
-            const encoder = new Prism.opus.Encoder({ rate: 48000, channels: 1, frameSize: 960 });
-            const oggMuxer = new Prism.opus.OggDemuxer(); // Wait, OggDemuxer is for reading.
-            
-            // Actually, many Whisper implementations handle the raw byte stream if we name it .ogg or .opus
             const wavPath = path.join(process.cwd(), `.rex_transcription_${Date.now()}.wav`);
-            const wavFile = fs.createWriteStream(wavPath);
+            const pcmChunks = [];
             
-            // To be safe and simple, let's use a known PCM to WAV helper if available, 
-            // otherwise Whisper is remarkably good at raw 16LE 48k.
-            const pcmStream = opusStream.pipe(new Prism.opus.Decoder({ frameSize: 960, channels: 1, rate: 48000 }));
-            pcmStream.on('data', chunk => wavFile.write(chunk));
+            // Decode incoming Opus packets to PCM (48kHz, mono, 16-bit)
+            const decoder = new Prism.opus.Decoder({ frameSize: 960, channels: 1, rate: 48000 });
+
+            // Catch any decoder errors gracefully (prevents unhandled crash in wasm/opusscript)
+            decoder.on('error', (err) => {
+                console.warn(pc.yellow(`[Rex Voice] Opus decoder warning: ${err.message}`));
+            });
+
+            opusStream.on('error', (err) => {
+                console.warn(pc.yellow(`[Rex Voice] Opus stream warning: ${err.message}`));
+                activeVoiceStreams.delete(userId);
+                try { decoder.destroy(); } catch {}
+            });
+
+            opusStream.on('close', () => {
+                activeVoiceStreams.delete(userId);
+            });
+
+            const pcmStream = opusStream.pipe(decoder);
+            pcmStream.on('data', chunk => pcmChunks.push(chunk));
+            pcmStream.on('error', (err) => {
+                console.warn(pc.yellow(`[Rex Voice] PCM stream warning: ${err.message}`));
+            });
 
             opusStream.on('end', async () => {
-                wavFile.end();
+                activeVoiceStreams.delete(userId);
+                try { decoder.destroy(); } catch {}
+
+                const pcmBuffer = Buffer.concat(pcmChunks);
+                if (pcmBuffer.length < 4800) return; // Ignore bursts <0.05s
+
+                const wavHeader = createWavHeader(pcmBuffer.length, 48000, 1, 16);
+                fs.writeFileSync(wavPath, Buffer.concat([wavHeader, pcmBuffer]));
                 
                 try {
                     const config = loadConfig();
-                    if (!config.openaiKey) {
-                        const hasOtherProviderKey = Boolean(config.geminiKey || config.claudeKey || config.deepseekKey);
-                        if (hasOtherProviderKey) {
-                            return channel.send("I can still chat with your configured API key, but voice transcription currently uses Whisper and needs an OpenAI key. Text chat is fully available right now.");
+                    let text = '';
+
+                    if (config.openaiKey) {
+                        const openai = new OpenAI({ apiKey: config.openaiKey });
+                        const transcription = await openai.audio.transcriptions.create({
+                            file: fs.createReadStream(wavPath),
+                            model: "whisper-1"
+                        });
+                        text = (transcription.text || '').trim();
+                    } else if (config.geminiKey) {
+                        try {
+                            const { GoogleGenerativeAI } = await import('@google/generative-ai');
+                            const genAI = new GoogleGenerativeAI(config.geminiKey);
+                            const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
+                            const audioBytes = fs.readFileSync(wavPath).toString('base64');
+                            const result = await model.generateContent([
+                                { inlineData: { mimeType: 'audio/wav', data: audioBytes } },
+                                'Transcribe the exact words spoken in this audio. Return ONLY the transcribed text with no commentary.'
+                            ]);
+                            text = (result.response.text() || '').trim();
+                        } catch (gErr) {
+                            console.warn('[Rex Voice] Gemini audio transcription error:', gErr.message);
                         }
-                        return channel.send("I can hear you, but no LLM API key is configured yet. Add any supported key (OpenAI, Gemini, Claude, or DeepSeek) for chat; OpenAI is additionally required for Whisper voice transcription.");
+                    } else {
+                        return channel.send("I heard you, but no OpenAI or Gemini key is configured for voice transcription.");
                     }
 
-                    const openai = new OpenAI({ apiKey: config.openaiKey });
-                    const transcription = await openai.audio.transcriptions.create({
-                        file: fs.createReadStream(wavPath),
-                        model: "whisper-1"
-                    });
-
-                    const text = transcription.text.trim();
                     if (!text || text.length < 2) return;
 
                     console.log(`${pc.bgBlue(pc.white(' DISCORD VOICE '))} ${pc.bold(userId)}: ${text}`);
@@ -433,16 +525,8 @@ export async function startDiscordBot() {
                         }, 1000);
                     }
                     
-                    // Respond visually in text channel + speak back
-                    const voicePseudoMessage = {
-                        channel,
-                        guild: channel.guild,
-                        author: { id: userId, username: 'Voice User' },
-                        reply: (content) => channel.send(`🦖🎙️ **[Voice]**: ${content}`),
-                        id: `voice_${Date.now()}`
-                    };
-
-                    await processAgentRequest({
+                    // Respond visually in text channel + speak back in call via Cartesia
+                    const finalReplyText = await processAgentRequest({
                         userId,
                         userTag: 'Voice User',
                         inputMessage: text,
@@ -457,6 +541,15 @@ export async function startDiscordBot() {
                             },
                         }
                     });
+
+                    // Talk back on calls using Cartesia Voice!
+                    if (finalReplyText) {
+                        const vc = activeVoiceConnections[channel.guild?.id];
+                        if (vc) {
+                            const { playTtsToVoicePlayer } = await import('./cartesia.js');
+                            await playTtsToVoicePlayer(vc.player, finalReplyText, `voice_${Date.now()}`);
+                        }
+                    }
                 } catch (e) {
                     console.error("Transcription Failed: ", e.message);
                 } finally {
@@ -487,6 +580,45 @@ export async function startDiscordBot() {
         } catch (err) {
             p.note(pc.yellow(`Failed to register slash commands: ${err.message}`), 'Discord Commands');
         }
+
+        try {
+            startCompanionEngine(c);
+            p.note(pc.magenta('Companion & check-in delegate engine started.'), 'Companion Delegates');
+        } catch (err) {
+            console.error(pc.yellow(`Failed to start companion delegate engine: ${err.message}`));
+        }
+
+        try {
+            startBurnoutSentinel(c);
+            p.note(pc.cyan('Burnout Sentinel & late-night work rhythm watcher active.'), 'Burnout Sentinel');
+        } catch (err) {
+            console.error(pc.yellow(`Failed to start burnout sentinel: ${err.message}`));
+        }
+
+        // Periodic Social Radar check for day-of reminders (every hour)
+        setInterval(async () => {
+            try {
+                const dueEvents = getDueEventsToday();
+                if (dueEvents.length > 0) {
+                    const cfg = loadConfig();
+                    const allowedIds = Array.isArray(cfg.discordAllowedUserIds) ? cfg.discordAllowedUserIds : [];
+                    const ownerId = allowedIds.find(id => id && id !== '*');
+                    if (ownerId) {
+                        const owner = await c.users.fetch(ownerId);
+                        if (owner) {
+                            for (const ev of dueEvents) {
+                                await owner.send(`🦖📡 **Social Radar Alert**: Today is **${ev.person}**'s ${ev.event}! Drop them a quick good-luck text or check in on them? 💚`);
+                            }
+                            const all = loadSocialRadar();
+                            saveSocialRadar(all.map(item => {
+                                const match = dueEvents.find(d => d.id === item.id);
+                                return match ? { ...item, reminded: true } : item;
+                            }));
+                        }
+                    }
+                }
+            } catch {}
+        }, 60 * 60 * 1000);
     });
 
     client.on(Events.InteractionCreate, async (interaction) => {
@@ -598,6 +730,11 @@ export async function startDiscordBot() {
             if (!interaction.isButton()) return;
 
             const [kind, sessionId, value] = String(interaction.customId || '').split(':');
+
+            if (kind === 'computer_perm') {
+                const handled = await handleComputerPermissionInteraction(interaction);
+                if (handled) return;
+            }
 
             if (kind === 'poll_vote') {
                 const session = pollSessions.get(sessionId);
@@ -727,6 +864,9 @@ export async function startDiscordBot() {
     client.on(Events.MessageCreate, async message => {
         if (message.author.bot) return;
 
+        // Record user activity timestamp for Burnout Sentinel
+        try { recordUserActivity(); } catch {}
+
         // ─── Proactive Feature: Vibe Sentinel & Buffer ───
         if (!recentChannelMessages.has(message.channelId)) recentChannelMessages.set(message.channelId, []);
         const buffer = recentChannelMessages.get(message.channelId);
@@ -776,11 +916,114 @@ export async function startDiscordBot() {
             console.error(pc.red(`Agentic message handling failed: ${e.message}`));
         }
 
+        // ─── Computer Control: Handle Pending Permission Text ("yes", "confirm", "cancel") ───
+        try {
+            const permTextHandled = await handleComputerPermissionTextMessage(message);
+            if (permTextHandled?.handled) return;
+        } catch (e) {
+            console.error(pc.red(`Computer permission text handling failed: ${e.message}`));
+        }
+
         const isDM = message.channel.isDMBased();
         const isMentioned = message.mentions.has(client.user);
 
         if (isDM || isMentioned) {
             let cleanContent = message.content.replace(`<@${client.user.id}>`, '').trim();
+
+            // ─── Computer Control: Intent Detection & Permission Request Gating ───
+            try {
+                const intent = detectComputerControlIntent(cleanContent);
+                if (intent.requiresControl) {
+                    await requestComputerPermission({
+                        message,
+                        task: intent.task,
+                        client
+                    });
+                    return;
+                }
+            } catch (e) {
+                console.error(pc.red(`Computer control intent detection failed: ${e.message}`));
+            }
+
+            // ─── Companion Delegate: Target User Conversational Sandbox (Zero Computer Control) ───
+            try {
+                const targetHandled = await handleTargetUserMessage(message, cleanContent, client);
+                if (targetHandled?.handled) return;
+            } catch (e) {
+                console.error(pc.red(`Companion target message handling failed: ${e.message}`));
+            }
+
+            // ─── Companion Delegate: Mission Commands (Checkup / Texting Delegate) ───
+            try {
+                const companionCmdHandled = await tryHandleCompanionCommand({ message, cleanContent, client, config });
+                if (companionCmdHandled?.handled) return;
+            } catch (e) {
+                console.error(pc.red(`Companion command handling failed: ${e.message}`));
+            }
+
+            // ─── Social Radar Commands ───
+            try {
+                const socialHandled = await tryHandleSocialRadarCommand({ message, cleanContent });
+                if (socialHandled?.handled) return;
+            } catch (e) {
+                console.error(pc.red(`Social radar command handling failed: ${e.message}`));
+            }
+
+            // ─── Burnout Sentinel Commands ───
+            try {
+                const burnoutHandled = await tryHandleBurnoutCommand({ message, cleanContent });
+                if (burnoutHandled?.handled) return;
+            } catch (e) {
+                console.error(pc.red(`Burnout command handling failed: ${e.message}`));
+            }
+
+            // ─── Neural Voice Memo Commands (Cartesia TTS) ───
+            try {
+                const voiceMemoHandled = await tryHandleVoiceMemoCommand({ message, cleanContent });
+                if (voiceMemoHandled?.handled) return;
+            } catch (e) {
+                console.error(pc.red(`Voice memo command handling failed: ${e.message}`));
+            }
+
+            // ─── Dino Hoard & Inside Jokes Commands ───
+            try {
+                const hoardHandled = await tryHandleDinoHoardCommand({ message, cleanContent });
+                if (hoardHandled?.handled) return;
+            } catch (e) {
+                console.error(pc.red(`Dino hoard command handling failed: ${e.message}`));
+            }
+
+            // ─── iMessage & SMS Commands ───
+            try {
+                const imessageHandled = await tryHandleIMessageCommand({ message, cleanContent });
+                if (imessageHandled?.handled) return;
+            } catch (e) {
+                console.error(pc.red(`iMessage command handling failed: ${e.message}`));
+            }
+
+            // ─── macOS Shortcuts Commands ───
+            try {
+                const shortcutHandled = await tryHandleShortcutsCommand({ message, cleanContent });
+                if (shortcutHandled?.handled) return;
+            } catch (e) {
+                console.error(pc.red(`Shortcuts command handling failed: ${e.message}`));
+            }
+
+            // ─── Camera / Webcam Snapshot Commands ───
+            try {
+                const cameraHandled = await tryHandleCameraCommand({ message, cleanContent });
+                if (cameraHandled?.handled) return;
+            } catch (e) {
+                console.error(pc.red(`Camera command handling failed: ${e.message}`));
+            }
+
+            // ─── Obsidian Vault Commands ───
+            try {
+                const obsidianHandled = await tryHandleObsidianCommand({ message, cleanContent });
+                if (obsidianHandled?.handled) return;
+            } catch (e) {
+                console.error(pc.red(`Obsidian command handling failed: ${e.message}`));
+            }
 
             let hasImage = false;
             let contentArray = [];
@@ -867,6 +1110,186 @@ export async function startDiscordBot() {
                 return;
             }
 
+            // Screen Vision command (JARVIS) — Bang or Natural Language
+            const visionMatch = cleanContent.match(/^(?:!(?:screen|vision)\b|(?:hey rex[, ]*)?(?:what(?:'s|\s+is)\s*(?:on|showing on)\s*my\s*screen|look\s*at\s*(?:my\s*)?screen|analyze\s*(?:my\s*)?screen|check\s*(?:my\s*)?screen|what do you see on my screen)\??)/i);
+            if (visionMatch) {
+                const prompt = cleanContent.replace(/^(?:!(?:screen|vision)\s*|(?:hey rex[, ]*)?(?:what(?:'s|\s+is)\s*(?:on|showing on)\s*my\s*screen|look\s*at\s*(?:my\s*)?screen|analyze\s*(?:my\s*)?screen|check\s*(?:my\s*)?screen|what do you see on my screen)\??\s*)/i, '').trim();
+                const statusMsg = await message.reply("📸 *Scanning display and running vision analysis...*");
+                try {
+                    const { analyzeScreen } = await import('./vision.js');
+                    const analysis = await analyzeScreen(null, prompt || null);
+                    await statusMsg.edit(`👁️ **Rex Vision (JARVIS)**:\n\n${analysis.slice(0, 1900)}`);
+                    const vc = activeVoiceConnections[message.guild?.id];
+                    if (vc) {
+                        const { playTtsToVoicePlayer } = await import('./cartesia.js');
+                        await playTtsToVoicePlayer(vc.player, analysis, `screen_${Date.now()}`);
+                    }
+                } catch (e) {
+                    await statusMsg.edit(`❌ Vision analysis failed: ${e.message}`);
+                }
+                return;
+            }
+
+            // Butler / Briefing command (Alfred) — Bang or Natural Language
+            const briefingMatch = cleanContent.match(/^(?:!(?:butler|briefing)\b|(?:hey rex[, ]*)?(?:give\s*me\s*(?:a|my)\s*)?(?:morning\s*briefing|daily\s*briefing|butler\s*briefing)\b)/i);
+            if (briefingMatch) {
+                const subCmd = cleanContent.replace(/^(?:!(?:butler|briefing)\s*|(?:hey rex[, ]*)?(?:give\s*me\s*(?:a|my)\s*)?(?:morning\s*briefing|daily\s*briefing|butler\s*briefing)\s*)/i, '').toLowerCase().trim();
+                if (subCmd === 'on' || subCmd === 'enable') {
+                    const { toggleAlfredButler } = await import('./alfredButler.js');
+                    const msg = await toggleAlfredButler(true);
+                    await message.reply(msg);
+                } else if (subCmd === 'off' || subCmd === 'disable') {
+                    const { toggleAlfredButler } = await import('./alfredButler.js');
+                    const msg = await toggleAlfredButler(false);
+                    await message.reply(msg);
+                } else {
+                    const { generateMorningBriefing } = await import('./alfredButler.js');
+                    const briefing = await generateMorningBriefing();
+                    await message.reply(`${briefing.greeting}\n\n${briefing.text}`);
+                    const vc = activeVoiceConnections[message.guild?.id];
+                    if (vc) {
+                        const { playTtsToVoicePlayer } = await import('./cartesia.js');
+                        await playTtsToVoicePlayer(vc.player, briefing.text, `briefing_${Date.now()}`);
+                    }
+                }
+                return;
+            }
+
+            // macOS AppleScript Bridge (!mac ...) or Natural Language Volume/Media/Lock/Mute
+            const macVolMatch = cleanContent.match(/^(?:!mac\s+volume\s*(\d{1,3})?|(?:hey rex[, ]*)?(?:please\s*)?(?:turn|set|put|change)?\s*(?:the\s*)?(?:mac\s*)?volume\s*(?:on\s*(?:my\s*)?mac\s*)?(?:to\s*)?(\d{1,3})%?)$/i);
+            const macMuteMatch = cleanContent.match(/^(?:!mac\s+mute\b|(?:hey rex[, ]*)?(?:mute|silence)\s*(?:the\s*)?(?:my\s*)?mac$)/i);
+            const macUnmuteMatch = cleanContent.match(/^(?:!mac\s+unmute\b|(?:hey rex[, ]*)?unmute\s*(?:the\s*)?(?:my\s*)?mac$)/i);
+            const macLockMatch = cleanContent.match(/^(?:!mac\s+lock\b|(?:hey rex[, ]*)?lock\s*(?:my\s*)?mac$)/i);
+            const macSleepMatch = cleanContent.match(/^(?:!mac\s+sleep\b|(?:hey rex[, ]*)?(?:put\s*(?:my\s*)?mac\s*to\s*sleep|sleep\s*(?:my\s*)?mac)$)/i);
+            const macMediaMatch = cleanContent.match(/^(?:!mac\s+media\s*(play|pause|next|prev|previous|track)?|(?:hey rex[, ]*)?(?:(pause|stop|play|resume|next|skip|previous|prev)\s*(?:the\s*)?(?:music|spotify|playback|song)|(?:what(?:'s|\s+is)\s*(?:the\s*)?(?:current\s*)?(?:playing|song|track)|what\s*song\s*is\s*(?:this|playing)|what['’]s playing)))$/i);
+
+            if (cleanContent.match(/^!mac\b/i) || macVolMatch || macMuteMatch || macUnmuteMatch || macLockMatch || macSleepMatch || macMediaMatch) {
+                const { executeAppleScript, macSystem, macMedia, macBrowsers } = await import('./appleScript.js');
+                const vc = activeVoiceConnections[message.guild?.id];
+
+                const speakIfVoice = async (text) => {
+                    if (vc) {
+                        try {
+                            const { playTtsToVoicePlayer } = await import('./cartesia.js');
+                            await playTtsToVoicePlayer(vc.player, text, `mac_${Date.now()}`);
+                        } catch {}
+                    }
+                };
+
+                if (macVolMatch) {
+                    const rawVal = macVolMatch[1] || macVolMatch[2];
+                    const vol = rawVal !== undefined ? parseInt(rawVal, 10) : NaN;
+                    const res = isNaN(vol) ? await macSystem.getVolume() : await macSystem.setVolume(vol);
+                    const reply = typeof res === 'number' ? `🔊 Mac volume is at ${res}%.` : `🔊 ${res}`;
+                    await message.reply(reply);
+                    await speakIfVoice(reply.replace(/[🔊%]/g, ''));
+                    return;
+                }
+
+                if (macMuteMatch) {
+                    const res = await macSystem.setMute(true);
+                    await message.reply(`🔇 ${res}`);
+                    await speakIfVoice("Mac muted.");
+                    return;
+                }
+
+                if (macUnmuteMatch) {
+                    const res = await macSystem.setMute(false);
+                    await message.reply(`🔊 ${res}`);
+                    await speakIfVoice("Mac unmuted.");
+                    return;
+                }
+
+                if (macLockMatch) {
+                    await macSystem.lockScreen();
+                    await message.reply(`🔒 Mac screen locked.`);
+                    await speakIfVoice("Mac locked.");
+                    return;
+                }
+
+                if (macSleepMatch) {
+                    await macSystem.sleepSystem();
+                    await message.reply(`🌙 Mac put to sleep.`);
+                    return;
+                }
+
+                if (macMediaMatch) {
+                    const explicit = macMediaMatch[1]?.toLowerCase();
+                    const natural = macMediaMatch[2]?.toLowerCase();
+                    const action = explicit || natural;
+
+                    if (action === 'play' || action === 'resume') {
+                        await macMedia.play();
+                        const tr = await macMedia.getCurrentTrack();
+                        const rep = tr ? `▶️ Resumed: ${tr.name} by ${tr.artist}` : '▶️ Playback started.';
+                        await message.reply(rep);
+                        await speakIfVoice(rep.replace(/▶️/g, ''));
+                    } else if (action === 'pause' || action === 'stop') {
+                        await macMedia.pause();
+                        await message.reply('⏸️ Playback paused.');
+                        await speakIfVoice('Playback paused.');
+                    } else if (action === 'next' || action === 'skip') {
+                        await macMedia.next();
+                        const tr = await macMedia.getCurrentTrack();
+                        const rep = tr ? `⏭️ Playing next: ${tr.name} by ${tr.artist}` : '⏭️ Skipped to next track.';
+                        await message.reply(rep);
+                        await speakIfVoice(rep.replace(/⏭️/g, ''));
+                    } else if (action === 'prev' || action === 'previous') {
+                        await macMedia.previous();
+                        const tr = await macMedia.getCurrentTrack();
+                        const rep = tr ? `⏮️ Playing previous: ${tr.name} by ${tr.artist}` : '⏮️ Returned to previous track.';
+                        await message.reply(rep);
+                        await speakIfVoice(rep.replace(/⏮️/g, ''));
+                    } else {
+                        // Track info query
+                        const tr = await macMedia.getCurrentTrack();
+                        const rep = tr ? `🎵 **${tr.app}**: ${tr.name} by ${tr.artist} (${tr.album}) [${tr.state}]` : 'No track is currently playing.';
+                        await message.reply(rep);
+                        await speakIfVoice(tr ? `Now playing: ${tr.name} by ${tr.artist}` : 'No track is currently playing.');
+                    }
+                    return;
+                }
+
+                // If explicit !mac <subcommand>
+                const raw = cleanContent.replace(/^!mac\s*/i, '').trim();
+                const parts = raw.split(' ');
+                const sub = parts[0].toLowerCase();
+                const rest = parts.slice(1).join(' ').trim();
+
+                if (sub === 'notify') {
+                    await macSystem.displayNotification(rest || 'Ping from Discord!');
+                    await message.reply(`🔔 Notification triggered on Mac.`);
+                } else if (sub === 'tab') {
+                    const tab = await macBrowsers.getActiveTab();
+                    await message.reply(tab ? `🌐 **${tab.browser}**: ${tab.title}\n<${tab.url}>` : 'No browser tab found.');
+                } else {
+                    const res = await executeAppleScript(raw);
+                    await message.reply(res.success ? `✅ AppleScript output: \`${res.output || 'Done'}\`` : `❌ AppleScript error: ${res.error}`);
+                }
+                return;
+            }
+
+            // Personal Dossier & Knowledge Graph (!dossier, !remember) — Bang or Natural Language
+            const dossierMatch = cleanContent.match(/^(?:!(?:dossier|personalmemory)\b|(?:hey rex[, ]*)?(?:who\s*am\s*i\??|what(?:'s|\s+is)\s*(?:in\s*)?my\s*dossier|show\s*(?:my\s*)?dossier)$)/i);
+            if (dossierMatch) {
+                const { getButlerDossier } = await import('./personalMemory.js');
+                await message.reply(`\`\`\`\n${getButlerDossier()}\n\`\`\``);
+                return;
+            }
+
+            const rememberMatch = cleanContent.match(/^(?:!remember\s+(.+)|(?:hey rex[, ]*)?remember\s+(?:that\s+)?(.+))$/i);
+            if (rememberMatch) {
+                const fact = (rememberMatch[1] || rememberMatch[2] || '').trim();
+                if (!fact) {
+                    await message.reply('Usage: `remember that <fact to commit to Rex memory>` or `!remember <fact>`');
+                    return;
+                }
+                const { rememberFact } = await import('./personalMemory.js');
+                const msg = rememberFact(fact);
+                await message.reply(`🧠 ${msg}`);
+                return;
+            }
+
             if (cleanContent.toLowerCase() === 'show ai model' || cleanContent.toLowerCase() === 'show model') {
                 const cfg = loadConfig();
                 const active = resolvePriorityProvider(cfg);
@@ -885,7 +1308,7 @@ export async function startDiscordBot() {
                 const provider = String(setModelMatch[1] || '').toLowerCase();
                 const modelName = String(setModelMatch[2] || '').trim();
                 if (!modelName) {
-                    await message.reply('Please provide a model name. Example: set model gemini gemini-2.5-flash');
+                    await message.reply('Please provide a model name. Example: set model gemini gemini-3.5-flash');
                     return;
                 }
 

@@ -54,7 +54,7 @@ function getIntentTarget(config = {}) {
     const provider = preferred || fromModel;
 
     if (provider === 'gemini') {
-        return { provider: 'gemini', model: config.geminiModel || 'gemini-2.5-flash' };
+        return { provider: 'gemini', model: config.geminiModel || 'gemini-3.5-flash' };
     }
     if (provider === 'openai') {
         return { provider: 'openai', model: config.openaiModel || 'gpt-5-mini' };

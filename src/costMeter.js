@@ -10,7 +10,7 @@ const MODEL_PRICING = {
     'ollama':       { input: 0, output: 0, label: 'Ollama (Free/Local)' },
     'local-llama':  { input: 0, output: 0, label: 'Local Llama (Free/Local)' },
     'openai':       { input: 0.15, output: 0.60, label: 'OpenAI gpt-4o-mini' },
-    'gemini':       { input: 0.075, output: 0.30, label: 'Gemini 2.5 Flash' },
+    'gemini':       { input: 0.075, output: 0.30, label: 'Gemini 3.5 Flash' },
     'claude':       { input: 0.25, output: 1.25, label: 'Claude 3 Haiku' },
     'deepseek':     { input: 0.14, output: 0.28, label: 'Deepseek Chat' }
 };

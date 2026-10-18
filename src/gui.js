@@ -34,7 +34,8 @@ Add-Type -MemberDefinition @'
 
         if (process.platform === 'darwin') {
             const script = `tell application "System Events" to click at {${x}, ${y}}`;
-            await execPromise(`osascript -e "${script}"`);
+            const safeScript = script.replace(/'/g, "'\\''");
+            await execPromise(`osascript -e '${safeScript}'`);
             p.log.success(`Clicked at (${x}, ${y})`);
             return;
         }
@@ -58,8 +59,9 @@ export async function typeText(text) {
 
         if (process.platform === 'darwin') {
             const escaped = escapeAppleScriptString(text);
-            const script = `tell application \"System Events\" to keystroke \"${escaped}\"`;
-            await execPromise(`osascript -e "${script}"`);
+            const script = `tell application "System Events" to keystroke "${escaped}"`;
+            const safeScript = script.replace(/'/g, "'\\''");
+            await execPromise(`osascript -e '${safeScript}'`);
             p.log.success(`Typed: "${pc.dim(text)}"`);
             return;
         }

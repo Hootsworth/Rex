@@ -47,9 +47,9 @@ export async function setBrightness(level) {
             // Built-in macOS does not expose direct percentage brightness control.
             // Use keyboard brightness events to move near the requested level.
             const steps = Math.round((brightness / 100) * 16);
-            await execPromise('osascript -e "tell application \"System Events\" to key code 145 using {fn down}"');
+            await execPromise("osascript -e 'tell application \"System Events\" to key code 145 using {fn down}'");
             if (steps > 0) {
-                await execPromise(`osascript -e "repeat ${steps} times" -e "tell application \"System Events\" to key code 144 using {fn down}" -e "end repeat"`);
+                await execPromise(`osascript -e 'repeat ${steps} times' -e 'tell application \"System Events\" to key code 144 using {fn down}' -e 'end repeat'`);
             }
             p.log.success(`Brightness adjusted to approximately ${pc.cyan(brightness + '%')}`);
             return;

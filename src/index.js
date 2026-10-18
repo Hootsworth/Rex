@@ -4,6 +4,7 @@ import pc from 'picocolors';
 import gradient from 'gradient-string';
 import { Command } from 'commander';
 import { loadConfig, saveConfig } from './config.js';
+import figlet from 'figlet';
 import { aiCodeReview } from './ai.js';
 import { quickGitPush } from './git.js';
 import { quickDockerPush } from './docker.js';
@@ -375,6 +376,321 @@ async function main() {
         });
 
     program
+        .command('keep-a-look')
+        .alias('look')
+        .description('Monitor a webpage for changes/conditions and trigger goals')
+        .option('--url <url>', 'Webpage URL to monitor')
+        .option('--condition <condition>', 'Condition to watch for (optional)')
+        .option('--action <action>', 'Goal to execute once condition is met')
+        .option('--interval <seconds>', 'Check interval in seconds (default: 30)')
+        .option('--selector <selector>', 'CSS selector to narrow down monitoring (optional)')
+        .option('--headless', 'Run browser in headless mode')
+        .action(async (opts) => {
+            const { keep_a_look } = await import('./webTools.js');
+            const url = opts.url || await p.text({
+                message: 'Webpage URL to monitor:',
+                placeholder: 'https://example.com/tickets',
+                validate: (v) => !v.trim() ? 'URL is required.' : undefined
+            });
+            if (p.isCancel(url)) process.exit(0);
+
+            const condition = opts.condition !== undefined ? opts.condition : await p.text({
+                message: 'Condition to watch for (optional, leave empty for any change):',
+                placeholder: 'tickets are available'
+            });
+            if (p.isCancel(condition)) process.exit(0);
+
+            const action = opts.action || await p.text({
+                message: 'Goal to execute once condition is met:',
+                placeholder: 'add 2 to checkout and take a screenshot of QR code',
+                validate: (v) => !v.trim() ? 'Goal is required.' : undefined
+            });
+            if (p.isCancel(action)) process.exit(0);
+
+            const intervalSeconds = opts.interval ? Number(opts.interval) : 30;
+            const selector = opts.selector || '';
+            const headless = opts.headless === true;
+
+            p.note(`Starting Keep-A-Look monitor job...\nURL: ${url}\nWatching: ${condition || 'Any content change'}\nAction: ${action}`, 'Keep-A-Look');
+
+            try {
+                const res = await keep_a_look({
+                    url: url.trim(),
+                    condition: condition ? condition.trim() : undefined,
+                    action: action.trim(),
+                    intervalSeconds,
+                    selector: selector ? selector.trim() : undefined,
+                    headless
+                });
+                p.note(res, 'Keep-A-Look Done');
+            } catch (err) {
+                p.log.error(`Keep-A-Look Error: ${err.message}`);
+            }
+            process.exit(0);
+        });
+
+    program
+        .command('screen [prompt...]')
+        .description('JARVIS Screen Vision: capture and analyze display with Gemini 3.5 Flash')
+        .option('--voice', 'Speak the analysis aloud using Cartesia TTS')
+        .action(async (promptArr, opts) => {
+            const { analyzeScreen } = await import('./vision.js');
+            const prompt = promptArr && promptArr.length ? promptArr.join(' ') : null;
+            const s = p.spinner();
+            s.start('Rex is observing your screen (JARVIS Vision)...');
+            try {
+                const res = await analyzeScreen(null, prompt, { speak: Boolean(opts.voice) });
+                s.stop('Screen analysis complete.');
+                p.note(res, 'Rex Vision (JARVIS)');
+            } catch (err) {
+                s.stop(pc.red('Vision failed: ' + err.message));
+            }
+            process.exit(0);
+        });
+
+    program
+        .command('butler [action]')
+        .description('Alfred Butler: proactive executive steward (on | off | briefing | status)')
+        .action(async (action) => {
+            const { toggleAlfredButler, generateMorningBriefing, speakBriefing, getSystemVitals, getWorkspaceIntel } = await import('./alfredButler.js');
+            const act = (action || '').toLowerCase().trim();
+            if (act === 'on') {
+                const msg = await toggleAlfredButler(true);
+                p.note(msg, 'Alfred Butler');
+            } else if (act === 'off') {
+                const msg = await toggleAlfredButler(false);
+                p.note(msg, 'Alfred Butler');
+            } else if (act === 'status' || act === 'vitals') {
+                const [v, g] = await Promise.all([getSystemVitals(), getWorkspaceIntel()]);
+                const details = [
+                    `🔋 Battery: ${v.batteryPercent !== null ? v.batteryPercent + '% (' + v.powerSource + ')' : 'N/A'}`,
+                    `⚙️ CPU Load: ${v.loadAvg.toFixed(2)} (${v.cpuCores} cores)`,
+                    `💾 Memory: ${v.freeMemMB}MB free / ${v.totalMemMB}MB total`,
+                    `📁 Workspace: ${g.branch ? 'Branch "' + g.branch + '" (' + g.uncommittedCount + ' uncommitted changes)' : 'Not in git'}`
+                ].join('\n');
+                p.note(details, 'Alfred System Vitals');
+            } else {
+                const s = p.spinner();
+                s.start('Preparing Alfred executive briefing...');
+                const briefing = await generateMorningBriefing();
+                s.stop('Briefing ready.');
+                p.note(briefing.text, briefing.greeting);
+                await speakBriefing(briefing.text);
+            }
+            process.exit(0);
+        });
+
+    program
+        .command('mac <action> [extra...]')
+        .description('Execute macOS AppleScript automation (volume, media, notify, lock, open, tab, raw)')
+        .action(async (action, extra) => {
+            const { executeAppleScript, macSystem, macMedia, macApps, macBrowsers } = await import('./appleScript.js');
+            const act = String(action || '').toLowerCase().trim();
+            const arg = extra && extra.length ? extra.join(' ') : '';
+
+            if (act === 'volume') {
+                const vol = parseInt(arg, 10);
+                const res = isNaN(vol) ? await macSystem.getVolume() : await macSystem.setVolume(vol);
+                p.note(typeof res === 'number' ? `Current volume: ${res}%` : res, 'macOS Volume');
+            } else if (act === 'mute') {
+                const res = await macSystem.setMute(arg !== 'off');
+                p.note(res, 'macOS Mute');
+            } else if (act === 'notify') {
+                await macSystem.displayNotification(arg || 'Hello from Rex!');
+                p.note(pc.green(`Notification sent: "${arg}"`), 'macOS Notification');
+            } else if (act === 'lock') {
+                await macSystem.lockScreen();
+                p.note(pc.green('Screen locked.'), 'macOS Security');
+            } else if (act === 'media') {
+                if (arg === 'play') await macMedia.play();
+                else if (arg === 'pause') await macMedia.pause();
+                else if (arg === 'next') await macMedia.next();
+                else if (arg === 'prev' || arg === 'previous') await macMedia.previous();
+                else if (arg === 'track') {
+                    const tr = await macMedia.getCurrentTrack();
+                    p.note(tr ? `${tr.app}: ${tr.name} by ${tr.artist} (${tr.album}) [${tr.state}]` : 'No track playing.', 'Now Playing');
+                    process.exit(0);
+                } else await macMedia.playPause();
+                const tr = await macMedia.getCurrentTrack();
+                p.note(tr ? `${tr.app}: ${tr.name} by ${tr.artist} [${tr.state}]` : 'Media command dispatched.', 'Media Control');
+            } else if (act === 'open') {
+                const res = await macApps.openApp(arg);
+                p.note(res.success ? `Opened ${arg}` : res.error, 'macOS App');
+            } else if (act === 'tab') {
+                const tab = await macBrowsers.getActiveTab();
+                p.note(tab ? `[${tab.browser}] ${tab.title}\n${tab.url}` : 'No active browser window detected.', 'Active Browser Tab');
+            } else {
+                const fullScript = [action, ...extra].join(' ');
+                const res = await executeAppleScript(fullScript);
+                if (res.success) {
+                    p.note(res.output || 'AppleScript executed successfully.', 'AppleScript Output');
+                } else {
+                    p.log.error(res.error);
+                }
+            }
+            process.exit(0);
+        });
+
+    program
+        .command('dossier')
+        .description('View Alfred Personal Knowledge Graph & Dossier on user')
+        .action(async () => {
+            const { getButlerDossier } = await import('./personalMemory.js');
+            p.note(getButlerDossier(), 'Alfred Personal Dossier');
+            process.exit(0);
+        });
+
+    program
+        .command('remember <fact...>')
+        .description('Commit a personal fact to Rex persistent memory graph')
+        .action(async (factArr) => {
+            const { rememberFact } = await import('./personalMemory.js');
+            const fact = factArr.join(' ');
+            const res = rememberFact(fact);
+            p.note(pc.green(res), 'Personal Knowledge Graph');
+            process.exit(0);
+        });
+
+    program
+        .command('listen')
+        .description('Start JARVIS Local Desktop Hands-Free Voice Assistant')
+        .action(async () => {
+            const { startDesktopVoiceAssistant } = await import('./voiceAssistant.js');
+            await startDesktopVoiceAssistant();
+        });
+
+    program
+        .command('mascot')
+        .alias('pet')
+        .description('Start the Retro 8-Bit Desktop Mascot Companion (docked in bottom-left)')
+        .option('--port <port>', 'Port to serve mascot on', '19888')
+        .option('--no-open', 'Do not automatically open desktop window')
+        .option('--screen', 'Also launch persistent macOS full-screen cursor')
+        .action(async (opts) => {
+            const { startDesktopMascot } = await import('./desktopMascot.js');
+            await startDesktopMascot({
+                port: parseInt(opts.port, 10) || 19888,
+                openBrowser: opts.open !== false,
+                screenCursor: Boolean(opts.screen)
+            });
+        });
+
+    program
+        .command('cursor [action]')
+        .alias('screen-cursor')
+        .description('Start or control Rex macOS Persistent Screen Cursor (Second Cursor across entire display)')
+        .option('--mode <mode>', 'Cursor mode: follow | autonomous | idle', 'follow')
+        .option('--appearance <appearance>', 'Appearance: both | dino | cursor', 'both')
+        .option('--style <style>', 'Icon style: default | handpointing | beachball | busy | handopen', 'default')
+        .action(async (action, opts) => {
+            const act = String(action || '').toLowerCase();
+            const {
+                startScreenCursor,
+                stopScreenCursor,
+                isScreenCursorRunning,
+                runCursorDemoTour,
+                cursorMenu,
+                cursorSpeak
+            } = await import('./screenCursor.js');
+            const { ensureMacosPermissions } = await import('./macosPermissions.js');
+
+            if (act === 'start') {
+                await startScreenCursor({
+                    mode: opts.mode,
+                    appearance: opts.appearance,
+                    style: opts.style,
+                    checkPermissions: true
+                });
+            } else if (act === 'follow') {
+                await startScreenCursor({
+                    mode: 'follow',
+                    appearance: opts.appearance,
+                    style: opts.style,
+                    checkPermissions: true
+                });
+            } else if (act === 'stop') {
+                stopScreenCursor();
+                p.log.success('Rex Screen Cursor stopped.');
+            } else if (act === 'status') {
+                p.note(`Running: ${isScreenCursorRunning() ? pc.green('ACTIVE') : pc.yellow('STOPPED')}`, 'Rex Screen Cursor');
+            } else if (act === 'demo' || act === 'test' || act === 'tour') {
+                await runCursorDemoTour();
+            } else if (act === 'listen' || act === 'voice') {
+                const { triggerVoiceCommand } = await import('./screenCursor.js');
+                p.log.info(pc.cyan('🎙️ Listening... Speak your command for Rex to figure out on your screen!'));
+                await triggerVoiceCommand();
+            } else if (act === 'permissions' || act === 'perms') {
+                await ensureMacosPermissions({ silent: false });
+            } else if (act === 'speak') {
+                const text = process.argv.slice(4).join(' ') || 'Rawr! I am Rex! 🦖';
+                if (!isScreenCursorRunning()) await startScreenCursor({ silent: true });
+                cursorSpeak(text);
+                p.log.success(`Rex spoke on screen: "${text}"`);
+            } else {
+                await cursorMenu();
+            }
+        });
+
+    program
+        .command('permissions')
+        .alias('perms')
+        .description('Check and request macOS system permissions (Accessibility & Screen Recording)')
+        .action(async () => {
+            const { ensureMacosPermissions } = await import('./macosPermissions.js');
+            await ensureMacosPermissions({ silent: false });
+            process.exit(0);
+        });
+
+    program
+        .command('daemon [action]')
+        .description('Manage Alfred Proactive Background Daemon (start, stop, status, run)')
+        .action(async (action) => {
+            const act = String(action || 'status').toLowerCase();
+            const { startDaemon, stopDaemon, getDaemonStatus, runHeartbeatWorker } = await import('./daemon.js');
+            if (act === 'start') {
+                const msg = startDaemon();
+                p.note(msg, 'Alfred Daemon');
+            } else if (act === 'stop') {
+                const msg = stopDaemon();
+                p.note(msg, 'Alfred Daemon');
+            } else if (act === 'run') {
+                await runHeartbeatWorker();
+            } else {
+                const status = getDaemonStatus();
+                p.note(status.running ? pc.green(`Daemon is ACTIVE (PID: ${status.pid})`) : pc.yellow('Daemon is STOPPED'), 'Alfred Daemon Status');
+            }
+            process.exit(0);
+        });
+
+    program
+        .command('whatsapp [action]')
+        .description('Start or configure Rex WhatsApp Bot Companion (Linked Device)')
+        .action(async (action) => {
+            const act = String(action || 'start').toLowerCase();
+            const { startWhatsAppBot, whatsappConfigMenu } = await import('./whatsappBot.js');
+            if (act === 'config' || act === 'settings') {
+                await whatsappConfigMenu();
+            } else {
+                await startWhatsAppBot();
+            }
+        });
+
+    program
+        .command('bridge [action]')
+        .description('Manage Web Agent Architect Chrome extension HTTP/AI Bridge')
+        .action(async (action) => {
+            const act = String(action || 'start').toLowerCase();
+            const { startBrowserBridge, getExtensionBridgeStatus } = await import('./browserBridge.js');
+            if (act === 'status') {
+                const stat = getExtensionBridgeStatus();
+                p.note(stat.serverRunning ? pc.green(`Bridge Server: Online\nExtension Connected: ${stat.extensionAlive}`) : pc.yellow('Bridge Server: Stopped'), 'Chrome Extension Bridge');
+            } else {
+                const res = startBrowserBridge(8787);
+                p.note(pc.green(res.message), 'Chrome Extension Bridge');
+            }
+        });
+
+    program
         .command('chat')
         .description('Open the interactive RexAI agent chat')
         .option('--debug', 'Show full prompt and token estimates')
@@ -387,6 +703,12 @@ async function main() {
         .option('--attach <glob>', 'Attach files matching glob to context (e.g. "src/*.js")')
         .argument('[prompt...]', 'Optional prompt for pipe-in mode')
         .action(async (promptArgs, opts) => {
+            // Auto-start active in-browser Chrome extension bridge on 8787 by default
+            try {
+                const { startBrowserBridge } = await import('./browserBridge.js');
+                startBrowserBridge(8787);
+            } catch {}
+
             const { startAgentChat } = await import('./chat.js');
             
             // Detect piped stdin (non-TTY)
@@ -422,6 +744,58 @@ async function main() {
             process.exit(0);
         });
 
+    program
+        .command('preflight [url]')
+        .description('Scan a website and generate navigation specs, SDKs, and agent tools')
+        .option('--name <name>', 'Project name (defaults to hostname)')
+        .option('--setup', 'Set up the Preflight Designer Python environment')
+        .action(async (url, opts) => {
+            const { isVenvReady, ensurePreflightVenv, runPreflightScan, formatScanSummary, copySpecsToOutput, preflightMenu } = await import('./preflightDesigner.js');
+
+            if (opts.setup) {
+                const s = p.spinner();
+                s.start('Setting up Preflight Designer environment...');
+                const result = await ensurePreflightVenv();
+                s.stop(result.ok ? pc.green(`✓ ${result.message}`) : pc.red(`✗ ${result.message}`));
+                process.exit(result.ok ? 0 : 1);
+            }
+
+            if (!url) {
+                await preflightMenu();
+                process.exit(0);
+            }
+
+            // Ensure venv
+            if (!isVenvReady()) {
+                const s = p.spinner();
+                s.start('Setting up Preflight Designer environment (first run)...');
+                const setup = await ensurePreflightVenv();
+                if (!setup.ok) {
+                    s.stop(pc.red(`✗ ${setup.message}`));
+                    process.exit(1);
+                }
+                s.stop(pc.green('✓ Environment ready.'));
+            }
+
+            const s = p.spinner();
+            s.start(`Scanning ${url}...`);
+            try {
+                const result = await runPreflightScan(url, { name: opts.name });
+                s.stop('Scan complete.');
+                console.log(formatScanSummary(result));
+
+                if (result.ok) {
+                    const path = await import('path');
+                    const outDir = path.join(process.cwd(), '.rex', 'preflight-specs', result.project_name);
+                    const copied = copySpecsToOutput(outDir);
+                    p.log.success(`Specs written to ${outDir} (${copied.length} files)`);
+                }
+            } catch (e) {
+                s.stop(pc.red(`✗ Scan failed: ${e.message}`));
+            }
+            process.exit(0);
+        });
+
     // Provide help output if --commands is passed
     if (process.argv.includes('--commands')) {
         await showComprehensiveHelp();
@@ -441,9 +815,9 @@ async function runInteractiveMenu() {
 
     console.clear();
     
-    // Clean typographic header — no CFonts banner
     console.log('');
-    console.log(`  ${brandTheme('rex')}`);  
+    console.log(gradient(['#0EA5E9', '#2563EB'])(figlet.textSync('REXAI')));
+    console.log(`  ${pc.cyan(pc.bold('Your Autonomous AI Intern'))}`);
     console.log(`  ${pc.dim(`v${pkg.version}  ·  ${platformLabel}`)}`);  
     console.log('');
     console.log(sectionRule());
@@ -553,6 +927,7 @@ async function runInteractiveMenu() {
                             { value: 'clip',        label: menuLabel('clp', 'Clipboard') },
                             { value: 'mail',        label: menuLabel('ml',  'Email') },
                             { value: 'gui',         label: menuLabel('gui', 'GUI') },
+                            { value: 'cursor',      label: menuLabel('cur', 'Rex Screen Cursor (macOS 2nd Cursor)') },
                             { value: 'share',       label: menuLabel('shr', 'Share Port') },
                             { value: 'hooks',       label: menuLabel('hok', 'Git Hooks') },
                             { value: 'plugins',     label: menuLabel('plg', 'Plugins') },
@@ -561,6 +936,7 @@ async function runInteractiveMenu() {
                     });
                     if (p.isCancel(powerAction) || powerAction === 'back') break;
 
+                    if (powerAction === 'cursor') { const { cursorMenu } = await import('./screenCursor.js'); await cursorMenu(); }
                     if (powerAction === 'terminal_gen') await aiTerminalCommand();
                     if (powerAction === 'system') { const { getSystemInfo } = await import('./system.js'); await getSystemInfo(); }
                     if (powerAction === 'connect') { const { connectorMenu } = await import('./connectors.js'); await connectorMenu(); }
@@ -593,23 +969,33 @@ async function runInteractiveMenu() {
                             { value: 'swarm',      label: menuLabel('swm', 'Swarm Delegation') },
                             { value: 'mcp',        label: menuLabel('mcp', 'Productivity Suite (MCP)') },
                             { value: 'sentinel',   label: menuLabel('srv', 'Start Sentinel Server (Webhooks)') },
+                            { value: 'cursor',     label: menuLabel('cur', 'Rex Screen Cursor (macOS 2nd Cursor)') },
+                            { value: 'mascot',     label: menuLabel('pet', 'Retro 8-Bit Mascot Companion (Desktop Pet)') },
                             { value: 'discord',    label: menuLabel('bot', 'Start Discord Bot Companion') },
                             { value: 'telegram',   label: menuLabel('tg',  'Start Telegram Bot Companion') },
+                            { value: 'whatsapp',   label: menuLabel('wa',  'Start WhatsApp Bot Companion (Linked Device)') },
                             { value: 'digest',     label: menuLabel('dgst','Daily Digest (Project Status)') },
                             { value: 'mood',       label: menuLabel('mood','Rex Mood Engine') },
                             { value: 'notif',      label: menuLabel('ntf', 'Notification Router') },
                             { value: 'reminders',  label: menuLabel('rmn', 'Reminders & Scheduling') },
+                            { value: 'preflight',  label: menuLabel('pfl', 'Preflight Designer (Website Compiler)') },
+                            { value: 'integrations', label: menuLabel('int', 'Integrations Config (Gmail, Notion, GitHub, Linear)') },
                             { value: 'back',       label: pc.dim('  back') }
                         ]
                     });
                     if (p.isCancel(labAction) || labAction === 'back') break;
                     
+                    if (labAction === 'cursor') { const { cursorMenu } = await import('./screenCursor.js'); await cursorMenu(); }
                     if (labAction === 'nerve_map') { const { nerve_map } = await import('./cortexKit.js'); const res = await nerve_map({ directory: process.cwd() }); p.note(res, 'CortexKit'); }
                     if (labAction === 'mcp') { const { mcpMenu } = await import('./mcpManager.js'); await mcpMenu(); }
                     if (labAction === 'sentinel') { 
                         const { startProductionVisionServer } = await import('./server.js'); 
                         await startProductionVisionServer(); 
                         p.note(pc.green('Production Vision Sentinel is running in the background.'), 'Sentinel Server');
+                    }
+                    if (labAction === 'mascot') {
+                        const { startDesktopMascot } = await import('./desktopMascot.js');
+                        await startDesktopMascot();
                     }
                     if (labAction === 'discord') {
                         const { startDiscordBot } = await import('./discordBot.js');
@@ -618,6 +1004,10 @@ async function runInteractiveMenu() {
                     if (labAction === 'telegram') {
                         const { startTelegramBot } = await import('./telegramBot.js');
                         await startTelegramBot();
+                    }
+                    if (labAction === 'whatsapp') {
+                        const { startWhatsAppBot } = await import('./whatsappBot.js');
+                        await startWhatsAppBot();
                     }
                     if (labAction === 'digest') {
                         const { showDailyDigest } = await import('./dailyDigest.js');
@@ -635,6 +1025,10 @@ async function runInteractiveMenu() {
                         const { remindersMenu } = await import('./reminders.js');
                         await remindersMenu();
                     }
+                    if (labAction === 'integrations') {
+                        const { integrationsConfigMenu } = await import('./integrations.js');
+                        await integrationsConfigMenu();
+                    }
                     if (labAction === 'hindsight') { 
                         const dir = path.join(process.cwd(), '.agent', 'hindsight');
                         if (!fs.existsSync(dir)) { p.log.warn('No hindsight records found.'); break; }
@@ -647,6 +1041,10 @@ async function runInteractiveMenu() {
                     if (labAction === 'swarm') { 
                         const task = await p.text({ message: 'Task for sub-agent:', placeholder: 'Research the latest version of React' });
                         if (!p.isCancel(task)) { const { delegate_task } = await import('./swarm.js'); const res = await delegate_task({ task }); p.note(res, 'Swarm Result'); }
+                    }
+                    if (labAction === 'preflight') {
+                        const { preflightMenu } = await import('./preflightDesigner.js');
+                        await preflightMenu();
                     }
                     break;
                 }
@@ -695,7 +1093,7 @@ async function handleSettings() {
             { value: 'ollama', label: '🦙 Ollama (Local, Free, Resource Friendly)' },
             { value: 'local-llama', label: '🦖 Local Llama (Native, Offline, No Ollama Req.)' },
             { value: 'openai', label: '🟢 OpenAI (Requires API Key) [gpt-5-nano | gpt-4o-mini | gpt-5-mini]' },
-            { value: 'gemini', label: '🟦 Google Gemini (Requires API Key) [gemini-2.5-flash | gemini-2.0-flash | gemini-2.5-flash-lite]' },
+            { value: 'gemini', label: '🟦 Google Gemini (Requires API Key) [gemini 3.5 flash | gemini 3.6flash | gemini 3.7 flash - lite]' },
             { value: 'claude', label: '🟧 Anthropic Claude (Requires API Key) [claude-3-5-haiku]' },
             { value: 'deepseek', label: '🐋 Deepseek (Requires API Key) [deepseek-chat]' }
         ],
@@ -786,11 +1184,11 @@ async function handleSettings() {
             const geminiModel = await p.select({
                 message: `${g.arrow} Gemini model`,
                 options: [
-                    { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash (best quality)' },
-                    { value: 'gemini-2.0-flash', label: 'gemini-2.0-flash (stable + fast)' },
-                    { value: 'gemini-2.5-flash-lite', label: 'gemini-2.5-flash-lite (cheapest / fastest)' }
+                    { value: 'gemini-3.5-flash', label: 'gemini 3.5 flash (best quality)' },
+                    { value: 'gemini-3.6-flash', label: 'gemini 3.6flash (stable + fast)' },
+                    { value: 'gemini-3.7-flash-lite', label: 'gemini 3.7 flash - lite (cheapest / fastest)' }
                 ],
-                initialValue: config.geminiModel || 'gemini-2.5-flash'
+                initialValue: config.geminiModel || 'gemini-3.5-flash'
             });
 
             if (!p.isCancel(geminiModel)) config.geminiModel = geminiModel;
@@ -808,7 +1206,7 @@ async function handleSettings() {
         config.agentRunnerProvider = 'openai';
         config.agentRunnerModel = config.agentRunnerModel || 'gpt-5-mini';
         config.agentPlannerOpenAIModel = config.agentPlannerOpenAIModel || 'gpt-4o-mini';
-        config.agentPlannerGeminiModel = config.agentPlannerGeminiModel || 'gemini-2.5-flash';
+        config.agentPlannerGeminiModel = config.agentPlannerGeminiModel || 'gemini-3.5-flash';
 
         const plannerProvider = config.aiModel === 'gemini' ? 'gemini' : 'openai';
         const plannerModel = plannerProvider === 'gemini'
@@ -972,6 +1370,7 @@ async function showComprehensiveHelp() {
                 { cmd: 'rexai docker-push', desc: 'Docker build and push' },
                 { cmd: 'rexai deploy', desc: 'Cloud deployment' },
                 { cmd: 'rexai share <port>', desc: 'Public tunnel for local port' },
+                { cmd: 'rexai preflight <url>', desc: 'Scan site → generate nav specs + SDKs' },
                 { cmd: 'rexai os-agent', desc: 'Windows OS automation' },
                 { cmd: 'rexai hook install', desc: 'AI git commit hooks' },
                 { cmd: 'rexai plugins', desc: 'Community plugins' }
